@@ -291,7 +291,7 @@ class MoCoSEModel(BertPreTrainedModel):
         self.online_projection = ProjectionLayer(config)
         
         self.prodiction = MLP(config)
-        self.loss_fct = InfoNCEWithQueue()
+        self.loss_fct = loss_fn
         self.init_weights()
 
         # add text aug
@@ -632,9 +632,8 @@ class MoCoSEModel(BertPreTrainedModel):
         view_target_1.pooler_output = target_out_1
         view_online_2.pooler_output = online_out_2
         view_target_2.pooler_output = target_out_2
-
         loss = self.loss_fct(online_out_1,target_out_2.detach())+self.loss_fct(online_out_2,target_out_1.detach())
-
+        loss=loss.mean()
         return SequenceClassifierOutput(
             loss=loss,
             hidden_states=[online_out_1,online_out_2, target_out_1,target_out_2],

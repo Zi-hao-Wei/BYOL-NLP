@@ -127,3 +127,11 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+wiki_for_sts_32/
+trained_models/
+SentEval/
+data/
+bert-base-uncased-weights/
+bert-base-uncased-weights.zip
+SentEval.zip
