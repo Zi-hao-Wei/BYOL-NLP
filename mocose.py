@@ -54,12 +54,18 @@ class ProjectionLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.proj_layers = config.proj_layers
-        self.proj = []
+        self.proj = nn.Sequential()
         self.config=config
+        # for i in range(config.proj_layers-1):
+        #     self.proj.append(nn.Linear(config.hidden_size, config.hidden_size))
+        #     self.proj.append(MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
+        #     self.proj.append(nn.Dropout(config.hidden_dropout_prob)
         for i in range(config.proj_layers-1):
-            self.proj.append(nn.Linear(config.hidden_size, config.hidden_size))
-            self.proj.append(MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
-            self.proj.append(nn.Dropout(config.hidden_dropout_prob))
+            self.proj.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
+            self.proj.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
+            self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
+            self.proj.add_module("relu_"+str(i),nn.ReLU())
+        
         self.relu = nn.ReLU()        
         self.dense = nn.Linear(config.hidden_size, config.out_size)
         self.BatchNorm = MaskBatchNorm(config.out_size, eps=config.layer_norm_eps)
@@ -67,11 +73,12 @@ class ProjectionLayer(nn.Module):
     
     def forward(self, x, **kwargs):
         if self.proj_layers > 1:
-            for i in range(self.config.proj_layers-1):
-                x = self.proj[3*i](x)
-                x = self.proj[3*i+1](x)
-                x = self.proj[3*i+2](x)
-                x = self.relu(x)
+            # for i in range(self.config.proj_layers-1):
+            #     x = self.proj[3*i](x)
+            #     x = self.proj[3*i+1](x)
+            #     x = self.proj[3*i+2](x)
+            #     x = self.relu(x)
+            x=self.proj(x)
 
         if self.proj_layers > 0:
             x = self.dense(x)
@@ -88,11 +95,12 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.mlp_layers = config.mlp_layers
-        self.mlp=[]
-        for i in range(config.proj_layers-1):
-            self.mlp.append(nn.Linear(config.hidden_size, config.hidden_size))
-            self.mlp.append(MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
-            self.mlp.append(nn.Dropout(config.hidden_dropout_prob))
+        self.mlp=nn.Sequential()
+        for i in range(config.mlp_layers-1):
+            self.mlp.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
+            self.mlp.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
+            self.mlp.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
+            self.mlp.add_module("relu_"+str(i),nn.ReLU())
         
         self.dense = nn.Linear(config.out_size, config.out_size)
         self.activation = nn.Tanh()
@@ -100,12 +108,12 @@ class MLP(nn.Module):
 
     def forward(self, x, **kwargs):
         if self.mlp_layers > 1:
-            for i in range(self.config.proj_layers-1):
-                x = self.proj[3*i](x)
-                x = self.proj[3*i+1](x)
-                x = self.proj[3*i+2](x)
-                x = self.relu(x)
-        
+            # for i in range(self.config.proj_layers-1):
+            #     x = self.proj[3*i](x)
+            #     x = self.proj[3*i+1](x)
+            #     x = self.proj[3*i+2](x)
+            #     x = self.relu(x)
+            x=self.mlp(x)
         x = self.dense(x)
         x = self.activation(x)
         
@@ -116,11 +124,16 @@ class PoolerWithoutActive(nn.Module):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
 
+        self.relu=nn.ReLU()
+        self.dense2 = nn.Linear(config.hidden_size, config.hidden_size)
+
     def forward(self, hidden_states, **kwargs):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
         first_token_tensor = hidden_states[:, 0]
         pooled_output = self.dense(first_token_tensor)
+        x=self.relu(pooled_output)
+        x=self.dense2(x)
         return pooled_output
 
 
@@ -182,6 +195,7 @@ def token_cut_off(inputs_embeds,seq_length,prob=0.1):
         for cut_index in cut_index_list:
             inputs_embeds[i][cut_index].fill_(0)
     return inputs_embeds
+
 
 
 def feature_cut_off(inputs_embeds,prob=0.01):
@@ -285,7 +299,7 @@ class MoCoSEEmbeddings(nn.Module):
         # drop out
         if not sent_emb:
             embeddings = self.dropout(embeddings)
-            embeddings = self.dropout(embeddings)
+            # embeddings = self.dropout(embeddings)
         return embeddings
 
 
@@ -308,7 +322,7 @@ class MoCoSEModel(BertPreTrainedModel):
         # add text aug
         ################## different augumentation experiment ######################
         if self.contextual_wordembs_aug:
-            with open(r'F:\Experiment\MoCoSE\codes\pretrained_bert\bert-base-uncased\vocab.txt','r',encoding='utf8') as f:
+            with open(r'.\bert-base-uncased-weights\vocab.txt','r',encoding='utf8') as f:
                 test_untokenizer = f.readlines()
             self.untokenizer = [i[:-1] for i in test_untokenizer]
             self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -501,6 +515,8 @@ class MoCoSEModel(BertPreTrainedModel):
             attention_online_last = attention_online[0]
             cls_vec = self.online_pooler(attention_online_last)
             attention_online.pooler_output = cls_vec
+            print(attention_online.pooler_output.shape)
+            print(torch.std(attention_online.pooler_output,dim=0).mean())
             return attention_online
        
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
@@ -529,7 +545,8 @@ class MoCoSEModel(BertPreTrainedModel):
                 past_key_values_length=past_key_values_length,
                 #sent_emb=sent_emb
         )             
-        
+        print("VIEW Simiarity",F.cosine_similarity(view1,view2).mean())
+
         # Encoder
         view_online_1 = self.online_encoder(
             view1,
@@ -556,6 +573,7 @@ class MoCoSEModel(BertPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+        print("VIEW Simiarity Oneline",F.cosine_similarity(view_online_1[0],view_online_2[0]).mean())
 
         with torch.no_grad():
             if self.contextual_wordembs_aug:

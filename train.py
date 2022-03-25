@@ -18,8 +18,8 @@ train_loader = DataLoader(train_dataset, batch_size=batch_size, drop_last = True
 
 config = BertConfig()
 config.out_size=768
-config.mlp_layers=2
-config.proj_layers=1
+config.mlp_layers=3
+config.proj_layers=2
 
 config.fgsm = 5e-9
 config.embedding_drop_prob = 0.1
@@ -102,11 +102,11 @@ args = TrainingArguments(
     output_dir = '.\\trained_models\\mocose_base_out\\',
     evaluation_strategy   = "steps",
     eval_steps            = 175,
-    learning_rate         = 3e-5,
+    learning_rate         = 1e-4,
     num_train_epochs      = 1.0,
     weight_decay          = 1e-6,
-    per_device_train_batch_size = 32,
-    per_device_eval_batch_size  = 32,
+    per_device_train_batch_size = 256,
+    per_device_eval_batch_size  = 256,
     dataloader_drop_last = True,
 )
 trainer = MoCoSETrainer(
