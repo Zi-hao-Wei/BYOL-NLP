@@ -23,8 +23,9 @@ from transformers.modeling_outputs import (
 )
 import nlpaug.augmenter.word as naw
 import nlpaug.augmenter.sentence as nas
+from maskBatchNorm import MaskBatchNorm
 logger = logging.getLogger(__name__)
-
+from powerNorm import MaskPowerNorm
 
 class EMA(torch.nn.Module):
     """
@@ -53,24 +54,28 @@ class ProjectionLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.proj_layers = config.proj_layers
-        self.proj = nn.Sequential()
-        
+        self.proj = []
+        self.config=config
         for i in range(config.proj_layers-1):
-            self.mlp.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
-            self.mlp.add_module("layer_norm_"+str(i),nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps))
-            self.mlp.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
-        
+            self.proj.append(nn.Linear(config.hidden_size, config.hidden_size))
+            self.proj.append(MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
+            self.proj.append(nn.Dropout(config.hidden_dropout_prob))
+        self.relu = nn.ReLU()        
         self.dense = nn.Linear(config.hidden_size, config.out_size)
-        self.LayerNorm = nn.LayerNorm(config.out_size, eps=config.layer_norm_eps)
+        self.BatchNorm = MaskBatchNorm(config.out_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
     
     def forward(self, x, **kwargs):
         if self.proj_layers > 1:
-            x = self.proj(x)
-            
+            for i in range(self.config.proj_layers-1):
+                x = self.proj[3*i](x)
+                x = self.proj[3*i+1](x)
+                x = self.proj[3*i+2](x)
+                x = self.relu(x)
+
         if self.proj_layers > 0:
             x = self.dense(x)
-            x = self.LayerNorm(x)
+            x = self.BatchNorm(x)
             x = self.dropout(x)
         
         return x
@@ -83,18 +88,23 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.mlp_layers = config.mlp_layers
-        self.mlp = nn.Sequential()
-        for i in range(config.mlp_layers-1):
-            self.mlp.add_module("mlp_"+str(i),nn.Linear(config.out_size, config.out_size))
-            self.mlp.add_module("layer_norm_"+str(i),nn.LayerNorm(config.out_size, eps=config.layer_norm_eps))
-            self.mlp.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
+        self.mlp=[]
+        for i in range(config.proj_layers-1):
+            self.mlp.append(nn.Linear(config.hidden_size, config.hidden_size))
+            self.mlp.append(MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
+            self.mlp.append(nn.Dropout(config.hidden_dropout_prob))
         
         self.dense = nn.Linear(config.out_size, config.out_size)
         self.activation = nn.Tanh()
+        self.relu = nn.ReLU()
 
     def forward(self, x, **kwargs):
         if self.mlp_layers > 1:
-            x = self.mlp(x)
+            for i in range(self.config.proj_layers-1):
+                x = self.proj[3*i](x)
+                x = self.proj[3*i+1](x)
+                x = self.proj[3*i+2](x)
+                x = self.relu(x)
         
         x = self.dense(x)
         x = self.activation(x)
@@ -275,6 +285,7 @@ class MoCoSEEmbeddings(nn.Module):
         # drop out
         if not sent_emb:
             embeddings = self.dropout(embeddings)
+            embeddings = self.dropout(embeddings)
         return embeddings
 
 
@@ -290,7 +301,7 @@ class MoCoSEModel(BertPreTrainedModel):
         self.online_pooler = PoolerWithoutActive(config)
         self.online_projection = ProjectionLayer(config)
         
-        self.prodiction = MLP(config)
+        self.predictor = MLP(config)
         self.loss_fct = loss_fn
         self.init_weights()
 
@@ -517,7 +528,7 @@ class MoCoSEModel(BertPreTrainedModel):
                 inputs_embeds=inputs_embeds,
                 past_key_values_length=past_key_values_length,
                 #sent_emb=sent_emb
-            )        
+        )             
         
         # Encoder
         view_online_1 = self.online_encoder(
@@ -615,8 +626,8 @@ class MoCoSEModel(BertPreTrainedModel):
         proj_online_2 = self.online_projection(proj_online_2)
 
         # prediction
-        online_out_1 = self.prodiction(proj_online_1)
-        online_out_2 = self.prodiction(proj_online_2)
+        online_out_1 = self.predictor(proj_online_1)
+        online_out_2 = self.predictor(proj_online_2)
 
 
         with torch.no_grad():
@@ -632,6 +643,7 @@ class MoCoSEModel(BertPreTrainedModel):
         view_target_1.pooler_output = target_out_1
         view_online_2.pooler_output = online_out_2
         view_target_2.pooler_output = target_out_2
+
         loss = self.loss_fct(online_out_1,target_out_2.detach())+self.loss_fct(online_out_2,target_out_1.detach())
         loss=loss.mean()
         return SequenceClassifierOutput(
