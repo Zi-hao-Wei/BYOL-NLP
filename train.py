@@ -4,7 +4,7 @@ from datasets import load_from_disk #, load_dataset, Dataset
 import pandas as pd
 from torch.utils.data import DataLoader
 import torch
-from mocose import *
+from simsiam import *
 from transformers import BertConfig
 from mocose_tools import MoCoSETrainer
 from transformers.trainer import TrainingArguments
