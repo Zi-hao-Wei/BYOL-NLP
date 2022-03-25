@@ -124,10 +124,18 @@ class PoolerWithoutActive(nn.Module):
         return pooled_output
 
 
-def loss_fn(x, y):
-    x = F.normalize(x, dim=-1, p=2)
-    y = F.normalize(y, dim=-1, p=2)
-    return 2 - 2 * (x * y).sum(dim=-1)
+def loss_fn(p, z, version='simplified'): # negative cosine similarity
+    if version == 'original':
+        z = z.detach() # stop gradient
+        p = F.normalize(p, dim=1) # l2-normalize 
+        z = F.normalize(z, dim=1) # l2-normalize 
+        return -(p*z).sum(dim=1).mean()
+
+    elif version == 'simplified':# same thing, much faster. Scroll down, speed test in __main__
+        return - F.cosine_similarity(p, z.detach(), dim=-1).mean()
+    else:
+        raise Exception
+
 
 class InfoNCEWithQueue(nn.Module):
     def __init__(self,temp=0.05):
@@ -284,7 +292,6 @@ class MoCoSEEmbeddings(nn.Module):
     
         # drop out
         if not sent_emb:
-            embeddings = self.dropout(embeddings)
             embeddings = self.dropout(embeddings)
         return embeddings
 
@@ -506,9 +513,9 @@ class MoCoSEModel(BertPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
         #self.online_embeddings.update(self.online_embeddings)
-        self.target_encoder.update(self.online_encoder)
-        self.target_pooler.update(self.online_pooler)
-        self.target_projection.update(self.online_projection)
+        # self.target_encoder.update(self.online_encoder)
+        # self.target_pooler.update(self.online_pooler)
+        # self.target_projection.update(self.online_projection)
         
         if self.contextual_wordembs_aug:
             # using contextual word embedding augumentations
@@ -530,8 +537,6 @@ class MoCoSEModel(BertPreTrainedModel):
                 #sent_emb=sent_emb
         )             
         
-        print("VIEW Simiarity",F.cosine_similarity(view1,view2))
-
         # Encoder
         view_online_1 = self.online_encoder(
             view1,
@@ -559,64 +564,11 @@ class MoCoSEModel(BertPreTrainedModel):
             return_dict=return_dict,
         )
 
-        with torch.no_grad():
-            if self.contextual_wordembs_aug:
-                # using contextual word embedding augumentations
-                view_target_1 = self.target_encoder.model(
-                    view1,
-                    attention_mask=aug_extended_attention_mask,
-                    head_mask=head_mask,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_extended_attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict,
-                )
-                view_target_2 = self.target_encoder.model(
-                    view2,
-                    attention_mask=aug_extended_attention_mask,
-                    head_mask=head_mask,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_extended_attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict,
-                )
-            else:
-                view_target_1 = self.target_encoder.model(
-                    view1,
-                    attention_mask=extended_attention_mask,
-                    head_mask=head_mask,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_extended_attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict,
-                )
-                view_target_2 = self.target_encoder.model(
-                    view2,
-                    attention_mask=extended_attention_mask,
-                    head_mask=head_mask,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_extended_attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict,
-                )
 
         # pooler
         attention_online_out_1 = view_online_1[0]
-        attention_target_out_1 = view_target_1[0]
         attention_online_out_2 = view_online_2[0]
-        attention_target_out_2 = view_target_2[0]
+    
         # 进行pooler
         proj_online_1 = self.online_pooler(attention_online_out_1)
         proj_online_2 = self.online_pooler(attention_online_out_2)
@@ -624,33 +576,23 @@ class MoCoSEModel(BertPreTrainedModel):
 
 
         # 进行 project
-        proj_online_1 = self.online_projection(proj_online_1)
-        proj_online_2 = self.online_projection(proj_online_2)
+        p1 = self.online_projection(proj_online_1)
+        p2 = self.online_projection(proj_online_2)
 
         # prediction
-        online_out_1 = self.predictor(proj_online_1)
-        online_out_2 = self.predictor(proj_online_2)
+        z1 = self.predictor(proj_online_1)
+        z2 = self.predictor(proj_online_2)
 
-
-        with torch.no_grad():
-            proj_target_1 = self.target_pooler.model(attention_target_out_1)
-            proj_target_2 = self.target_pooler.model(attention_target_out_2)
-            proj_target_1 = self.target_projection.model(proj_target_1)
-            proj_target_2 = self.target_projection.model(proj_target_2)
-            target_out_1 = proj_target_1.detach_()
-            target_out_2 = proj_target_2.detach_()
 
         # set pooler output
-        view_online_1.pooler_output = online_out_1
-        view_target_1.pooler_output = target_out_1
-        view_online_2.pooler_output = online_out_2
-        view_target_2.pooler_output = target_out_2
+        view_online_1.pooler_output = p1
+        view_online_2.pooler_output = p2
 
-        loss = self.loss_fct(online_out_1,target_out_2.detach())+self.loss_fct(online_out_2,target_out_1.detach())
+        loss = self.loss_fct(p1,z2)/2+self.loss_fct(p2,z1)/2
         loss=loss.mean()
         return SequenceClassifierOutput(
             loss=loss,
-            hidden_states=[online_out_1,online_out_2, target_out_1,target_out_2],
+            hidden_states=[p1,p2, z1,z2],
             attentions=None,
         )   
         
