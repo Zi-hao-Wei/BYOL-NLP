@@ -26,7 +26,7 @@ import nlpaug.augmenter.sentence as nas
 from maskBatchNorm import MaskBatchNorm
 logger = logging.getLogger(__name__)
 from powerNorm import MaskPowerNorm
-
+from mocose_tools import PATH_NOW
 class EMA(torch.nn.Module):
     """
     [https://www.tensorflow.org/api_docs/python/tf/train/ExponentialMovingAverage]
@@ -322,7 +322,7 @@ class MoCoSEModel(BertPreTrainedModel):
         # add text aug
         ################## different augumentation experiment ######################
         if self.contextual_wordembs_aug:
-            with open(r'.\bert-base-uncased-weights\vocab.txt','r',encoding='utf8') as f:
+            with open(PATH_NOW+r'\bert-base-uncased-weights\vocab.txt','r',encoding='utf8') as f:
                 test_untokenizer = f.readlines()
             self.untokenizer = [i[:-1] for i in test_untokenizer]
             self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')

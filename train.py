@@ -8,14 +8,14 @@ import torch
 from mocose import *
 
 from transformers import BertConfig
-from mocose_tools import MoCoSETrainer
+from mocose_tools import MoCoSETrainer, PATH_NOW
 from transformers.trainer import TrainingArguments
 
 import torch.nn.functional as F
 
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 batch_size = 64
-train_dataset = load_from_disk(".\\wiki_for_sts_32")
+train_dataset = load_from_disk(PATH_NOW+"\\wiki_for_sts_32")
 train_loader = DataLoader(train_dataset, batch_size=batch_size, drop_last = True)
 
 config = BertConfig()
@@ -39,15 +39,15 @@ config.ema_decay = 0.995
 
 config.neg_queue_slice_span = 256 # euqal to batch size, won't work if age_test=False
 
-with open(r'.\bert-base-uncased-weights\vocab.txt','r',encoding='utf8') as f:
+with open(PATH_NOW+r'\bert-base-uncased-weights\vocab.txt','r',encoding='utf8') as f:
     test_untokenizer = f.readlines()
 untokenizer = [i[:-1] for i in test_untokenizer]
 config.untokenizer = untokenizer
 
 model = MoCoSEModel(config)
-model.online_embeddings.load_state_dict(torch.load('.\\bert-base-uncased-weights\\embeddings.pth'))
-model.online_encoder.load_state_dict(torch.load('.\\bert-base-uncased-weights\\encoder.pth'))
-model.online_pooler.dense.load_state_dict(torch.load('.\\bert-base-uncased-weights\\pooler_dense.pth'))
+model.online_embeddings.load_state_dict(torch.load(PATH_NOW+'\\bert-base-uncased-weights\\embeddings.pth'))
+model.online_encoder.load_state_dict(torch.load(PATH_NOW+'\\bert-base-uncased-weights\\encoder.pth'))
+model.online_pooler.dense.load_state_dict(torch.load(PATH_NOW+'\\bert-base-uncased-weights\\pooler_dense.pth'))
 
 model.prepare()
 model = model.cuda()
@@ -101,7 +101,7 @@ def get_unif(model, dataloader):
     return unif_all
 
 args = TrainingArguments(
-    output_dir = '.\\trained_models\\mocose_base_out\\',
+    output_dir = PATH_NOW+'\\trained_models\\mocose_base_out\\',
     evaluation_strategy   = "steps",
     eval_steps            = 175,
     learning_rate         = 1e-4,
