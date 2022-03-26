@@ -4,7 +4,9 @@ from datasets import load_from_disk #, load_dataset, Dataset
 import pandas as pd
 from torch.utils.data import DataLoader
 import torch
-from simsiam import *
+# from simsiam import *
+from mocose import *
+
 from transformers import BertConfig
 from mocose_tools import MoCoSETrainer
 from transformers.trainer import TrainingArguments
@@ -22,7 +24,7 @@ config.mlp_layers=3
 config.proj_layers=2
 
 config.fgsm = 5e-9
-config.embedding_drop_prob = 0.1
+config.embedding_drop_prob = 0.2
 config.token_drop_prob = 0
 config.feature_drop_prob = 0
 config.token_shuffle = False
@@ -32,7 +34,7 @@ config.age_test = False
 
 config.K = 256
 config.K_start = 128
-config.ema_decay = 0.75
+config.ema_decay = 0.995
 
 
 config.neg_queue_slice_span = 256 # euqal to batch size, won't work if age_test=False

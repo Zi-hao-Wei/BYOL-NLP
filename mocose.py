@@ -627,6 +627,7 @@ class MoCoSEModel(BertPreTrainedModel):
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
                 )
+        print("VIEW Simiarity Target",F.cosine_similarity(view_online_1[0],view_target_1[0]).mean())
 
         # pooler
         attention_online_out_1 = view_online_1[0]
