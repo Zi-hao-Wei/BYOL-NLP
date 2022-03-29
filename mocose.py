@@ -62,9 +62,9 @@ class ProjectionLayer(nn.Module):
         #     self.proj.append(nn.Dropout(config.hidden_dropout_prob)
         for i in range(config.proj_layers-1):
             self.proj.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
+            self.proj.add_module("relu_"+str(i),nn.ReLU()),
             self.proj.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
             self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
-            self.proj.add_module("relu_"+str(i),nn.ReLU())
         
         self.relu = nn.ReLU()        
         self.dense = nn.Linear(config.hidden_size, config.out_size)
@@ -98,9 +98,9 @@ class MLP(nn.Module):
         self.mlp=nn.Sequential()
         for i in range(config.mlp_layers-1):
             self.mlp.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
+            self.mlp.add_module("relu_"+str(i),nn.ReLU()),
             self.mlp.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
             self.mlp.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
-            self.mlp.add_module("relu_"+str(i),nn.ReLU())
         
         self.dense = nn.Linear(config.out_size, config.out_size)
         self.activation = nn.Tanh()
@@ -124,16 +124,19 @@ class PoolerWithoutActive(nn.Module):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
 
-        self.relu=nn.ReLU()
-        self.dense2 = nn.Linear(config.hidden_size, config.hidden_size)
+        # self.relu=nn.ReLU()
+        # self.dense2 = nn.Linear(config.hidden_size, config.hidden_size)
 
     def forward(self, hidden_states, **kwargs):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
         first_token_tensor = hidden_states[:, 0]
+        # print(hidden_states.shape)
+        # first_token_tensor=hidden_states.permute(0,2,1)[:,:,1:].mean(dim=2)
+        # print(first_token_tensor.shape,hidden_states[:,0].shape)
         pooled_output = self.dense(first_token_tensor)
-        x=self.relu(pooled_output)
-        x=self.dense2(x)
+        # x=self.relu(pooled_output)
+        # x=self.dense2(x)
         return pooled_output
 
 
@@ -515,8 +518,8 @@ class MoCoSEModel(BertPreTrainedModel):
             attention_online_last = attention_online[0]
             cls_vec = self.online_pooler(attention_online_last)
             attention_online.pooler_output = cls_vec
-            print(attention_online.pooler_output.shape)
-            print(torch.std(attention_online.pooler_output,dim=0).mean())
+            # print(attention_online.pooler_output.shape)
+            # print(torch.std(attention_online.pooler_output,dim=0).mean())
             return attention_online
        
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
@@ -545,7 +548,7 @@ class MoCoSEModel(BertPreTrainedModel):
                 past_key_values_length=past_key_values_length,
                 #sent_emb=sent_emb
         )             
-        print("VIEW Simiarity",F.cosine_similarity(view1,view2).mean())
+        # print("VIEW Simiarity",F.cosine_similarity(view1,view2).mean())
 
         # Encoder
         view_online_1 = self.online_encoder(
@@ -573,7 +576,7 @@ class MoCoSEModel(BertPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        print("VIEW Simiarity Oneline",F.cosine_similarity(view_online_1[0],view_online_2[0]).mean())
+        # print("VIEW Simiarity Oneline",F.cosine_similarity(view_online_1[0],view_online_2[0]).mean())
 
         with torch.no_grad():
             if self.contextual_wordembs_aug:
@@ -627,7 +630,7 @@ class MoCoSEModel(BertPreTrainedModel):
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
                 )
-        print("VIEW Simiarity Target",F.cosine_similarity(view_online_1[0],view_target_1[0]).mean())
+        # print("VIEW Simiarity Target",F.cosine_similarity(view_online_1[0],view_target_1[0]).mean())
 
         # pooler
         attention_online_out_1 = view_online_1[0]
