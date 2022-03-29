@@ -5,7 +5,7 @@ import pandas as pd
 from torch.utils.data import DataLoader
 import torch
 # from simsiam import *
-from barlowtwins import *
+from EMAbarlow import *
 
 from transformers import BertConfig
 from mocose_tools import MoCoSETrainer, PATH_NOW
@@ -14,19 +14,19 @@ from transformers.trainer import TrainingArguments
 import torch.nn.functional as F
 
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-batch_size = 64
+batch_size = 256
 train_dataset = load_from_disk(PATH_NOW+"/wiki_for_sts_32")
 train_loader = DataLoader(train_dataset, batch_size=batch_size, drop_last = True)
 
 config = BertConfig()
-config.out_size=2048
-config.mlp_layers=3
+config.out_size=768
+config.mlp_layers=2
 config.proj_layers=2
 
 config.fgsm = 5e-9
 config.embedding_drop_prob = 0.2
-config.hidden_dropout_prob=0.1
-config.attention_probs_dropout_prob=0.1
+config.hidden_dropout_prob=0.2
+config.attention_probs_dropout_prob=0.2
 config.token_drop_prob = 0
 config.feature_drop_prob = 0
 config.token_shuffle = False
@@ -36,7 +36,7 @@ config.age_test = False
 
 config.K = 256
 config.K_start = 128
-config.ema_decay = 0.85
+config.ema_decay = 0.995
 
 
 config.neg_queue_slice_span = 256 # euqal to batch size, won't work if age_test=False
@@ -105,8 +105,8 @@ def get_unif(model, dataloader):
 args = TrainingArguments(
     output_dir = PATH_NOW+'/trained_models/mocose_base_out/',
     evaluation_strategy   = "steps",
-    eval_steps            = 100,
-    learning_rate         = 3e-4,
+    eval_steps            = 50,
+    learning_rate         = 3e-5,
     warmup_ratio=0.3,
     num_train_epochs      = 1.0,
     weight_decay          = 1e-6,

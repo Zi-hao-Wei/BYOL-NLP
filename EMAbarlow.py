@@ -56,30 +56,26 @@ class ProjectionLayer(nn.Module):
         self.proj_layers = config.proj_layers
         self.proj = nn.Sequential()
         self.config=config
-        # for i in range(config.proj_layers-1):
-        #     self.proj.append(nn.Linear(config.hidden_size, config.hidden_size))
-        #     self.proj.append(MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
-        #     self.proj.append(nn.Dropout(config.hidden_dropout_prob)
         for i in range(config.proj_layers-1):
             self.proj.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
             self.proj.add_module("relu_"+str(i),nn.ReLU())
-            self.proj.add_module("batch_norm"+str(i),nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps))
+            self.proj.add_module("layer_norm"+str(i),nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps))
             self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
         
         self.relu = nn.ReLU()        
         self.dense = nn.Linear(config.hidden_size, config.out_size)
-        self.LayerNorm = nn.LayerNorm(config.out_size, eps=config.layer_norm_eps)
+        self.Batchnorm = nn.BatchNorm1d(config.out_size)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
     
     def forward(self, x, **kwargs):
         if self.proj_layers > 1:
             x=self.proj(x)
 
-        if self.proj_layers > 0:
-            x = self.dense(x)
-            x = self.LayerNorm(x)
-            x = self.dropout(x)
-        
+        x = self.dense(x)
+        x = self.relu(x)
+        x = self.Batchnorm(x)
+        x = self.dropout(x)
+    
         return x
 
 
@@ -93,19 +89,23 @@ class MLP(nn.Module):
         self.mlp=nn.Sequential()
         for i in range(config.mlp_layers-1):
             self.mlp.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
-            self.mlp.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
+            self.mlp.add_module("layer_norm"+str(i),nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps))
             self.mlp.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
             self.mlp.add_module("relu_"+str(i),nn.ReLU())
         
         self.dense = nn.Linear(config.out_size, config.out_size)
-        self.activation = nn.Tanh()
+        self.Batchnorm = nn.BatchNorm1d(config.out_size)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.relu = nn.ReLU()
 
     def forward(self, x, **kwargs):
         if self.mlp_layers > 1:
             x=self.mlp(x)
+
         x = self.dense(x)
-        x = self.activation(x)
+        x = self.relu(x)
+        x = self.Batchnorm(x)
+        x = self.dropout(x)
         
         return x
 
@@ -114,16 +114,20 @@ class PoolerWithoutActive(nn.Module):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
 
-        self.relu=nn.ReLU()
-        self.dense2 = nn.Linear(config.hidden_size, config.hidden_size)
-
-    def forward(self, hidden_states, **kwargs):
+    def forward(self, hidden_states,  pooling="cls"):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
-        first_token_tensor = hidden_states[:, 0]
-        pooled_output = self.dense(first_token_tensor)
-        x=self.relu(pooled_output)
-        x=self.dense2(x)
+        pooled=None
+        if pooling == "cls":
+            pooled = hidden_states[:, 0]
+        elif pooling== "avg":
+            pooled=hidden_states.permute(0,2,1).mean(dim=2)
+        elif pooling == "first-last":
+            pooled=hidden_states[:,-1].mean(dim=1) + hidden_states[:,1].mean(dim=1)
+        else:
+            pooled=hidden_states[:,-1].mean(dim=1) + hidden_states[:,-2].mean(dim=1)
+        pooled_output = self.dense(pooled)
+        
         return pooled_output
 
 
@@ -320,7 +324,7 @@ class MoCoSEModel(BertPreTrainedModel):
         self.predictor = MLP(config)
         self.loss_fct = loss_fn
         self.init_weights()
-
+        self.counter=0
         # add text aug
         ################## different augumentation experiment ######################
         if self.contextual_wordembs_aug:
@@ -627,6 +631,7 @@ class MoCoSEModel(BertPreTrainedModel):
                 )
 
         # pooler
+        # print(view_online_1.shape)
         attention_online_out_1 = view_online_1[0]
         attention_target_out_1 = view_target_1[0]
         attention_online_out_2 = view_online_2[0]
@@ -635,10 +640,9 @@ class MoCoSEModel(BertPreTrainedModel):
         proj_online_1 = self.online_pooler(attention_online_out_1)
         proj_online_2 = self.online_pooler(attention_online_out_2)
 
-        c = self.bn(proj_online_1).T @ self.bn(proj_online_2)
+        c = proj_online_1.T @ proj_online_2
         # sum the cross-correlation matrix between all gpus
-        c.div_(256)
-        print(c)
+        c.div_(proj_online_1.shape[0])
         loss1=loss_fn_bar(c).mean()
 
         # 进行 project
@@ -666,7 +670,12 @@ class MoCoSEModel(BertPreTrainedModel):
 
         loss2 = self.loss_fct(online_out_1,target_out_2.detach())+self.loss_fct(online_out_2,target_out_1.detach())
         loss2=loss2.mean()
-        loss=loss1+loss2
+        loss=None
+        if self.counter<500:
+            loss = loss1+ 0.1*loss2
+        else:
+            loss = loss2+ 0.1*loss1
+        self.counter+=1
         return SequenceClassifierOutput(
             loss=loss,
             hidden_states=[online_out_1,online_out_2, target_out_1,target_out_2],
