@@ -300,6 +300,7 @@ class MoCoSEModel(BertPreTrainedModel):
         self.online_encoder = BertEncoder(config)
         self.online_pooler = PoolerWithoutActive(config)
         self.online_projection = ProjectionLayer(config)
+        
         self.bn = nn.BatchNorm1d(config.hidden_size, affine=False)
         self.prodiction = MLP(config)
         self.loss_fct = InfoNCEWithQueue()
@@ -345,7 +346,14 @@ class MoCoSEModel(BertPreTrainedModel):
 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
         self.prepare()
-        
+
+    def save(self):
+        torch.save(self.online_embeddings.state_dict(), "embeddings.pth")
+        torch.save(self.online_encoder.state_dict(), "encoder.pth")
+        torch.save(self.online_pooler.state_dict(), "pooler_dense.pth")
+
+
+
     def prepare(self):
         #self.target_embeddings = EMA(self.online_embeddings, decay = self.decay)
         self.target_encoder = EMA(self.online_encoder,decay = self.decay)

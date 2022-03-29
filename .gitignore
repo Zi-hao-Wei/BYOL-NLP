@@ -133,5 +133,7 @@ trained_models/
 SentEval/
 data/
 bert-base-uncased-weights/
+mocose-bert-base-uncased/
+mocose-bert-base-uncased*
 bert-base-uncased-weights.zip
 SentEval.zip

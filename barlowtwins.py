@@ -28,101 +28,27 @@ from maskBatchNorm import MaskBatchNorm
 logger = logging.getLogger(__name__)
 from powerNorm import MaskPowerNorm
 lambd=0.0051
-class EMA(torch.nn.Module):
-    """
-    [https://www.tensorflow.org/api_docs/python/tf/train/ExponentialMovingAverage]
-    """
-
-    def __init__(self, model, decay,total_step=15000):
-        super().__init__()
-        self.decay = decay
-        self.total_step = total_step
-        self.step = 0
-        self.model = copy.deepcopy(model).eval()
-
-    def update(self, model):
-        self.step = self.step+1
-        decay_new = 1-(1-self.decay)*(math.cos(math.pi*self.step/self.total_step)+1)/2
-        # 慢慢把self.model往model移动
-        with torch.no_grad():
-            e_std = self.model.state_dict().values()
-            m_std = model.state_dict().values()
-            for e, m in zip(e_std, m_std):
-                e.copy_(decay_new * e + (1. - decay_new) * m)
-
-
-class ProjectionLayer(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.proj_layers = config.proj_layers
-        self.proj = nn.Sequential()
-        self.config=config
-        for i in range(config.proj_layers-1):
-            self.proj.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
-            self.proj.add_module("relu_"+str(i),nn.ReLU())
-            self.proj.add_module("layer_norm"+str(i),nn.LayerNorm(config.hidden_size))
-            self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
-            
-        
-        self.relu = nn.ReLU()        
-        self.dense = nn.Linear(config.hidden_size, config.out_size)
-        self.LayerNorm = nn.LayerNorm(config.out_size)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-    
-    def forward(self, x, **kwargs):
-        if self.proj_layers > 1:
-            x=self.proj(x)
-
-        if self.proj_layers > 0:
-            x = self.dense(x)
-            x = self.LayerNorm(x)
-            x = self.dropout(x)
-        
-        return x
-
-
-class MLP(nn.Module):
-    """
-    Head for getting sentence representations over RoBERTa/BERT's CLS representation.
-    """
-    def __init__(self, config):
-        super().__init__()
-        self.mlp_layers = config.mlp_layers
-        self.mlp=nn.Sequential()
-        for i in range(config.mlp_layers-1):
-            self.mlp.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
-            self.mlp.add_module("relu_"+str(i),nn.ReLU())
-            self.mlp.add_module("batch_norm"+str(i),nn.BatchNorm1d(config.hidden_size))
-            self.mlp.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
-        
-        self.dense = nn.Linear(config.out_size, config.out_size)
-        self.activation = nn.Tanh()
-        self.relu = nn.ReLU()
-
-    def forward(self, x, **kwargs):
-        if self.mlp_layers > 1:
-            x=self.mlp(x)
-        x = self.dense(x)
-        x = self.activation(x)
-        
-        return x
 
 class PoolerWithoutActive(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.l1 = nn.Linear(config.hidden_size, config.hidden_size)
+        self.l2 = nn.Linear(config.hidden_size, config.out_size)
+        self.activation=nn.Tanh()
 
-        self.relu=nn.ReLU()
-        self.dense2 = nn.Linear(config.hidden_size, config.hidden_size)
+
+        # self.dense2 = nn.Linear(config.hidden_size, config.hidden_size)
 
     def forward(self, hidden_states, **kwargs):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
         first_token_tensor = hidden_states[:, 0]
-        pooled_output = self.dense(first_token_tensor)
-        x=self.relu(pooled_output)
-        x=self.dense2(x)
-        return pooled_output
+        x = self.l1(first_token_tensor)
+        x=self.activation(x)
+        x=self.l2(x)
+        x=self.activation(x)
+
+        return x
 
 
 def off_diagonal(x):
@@ -138,84 +64,6 @@ def loss_fn(c):
     return loss
 
 
-class InfoNCEWithQueue(nn.Module):
-    def __init__(self,temp=0.05):
-        super().__init__()
-        self.temp = temp
-        self.cos = nn.CosineSimilarity(dim=-1)
-        self.loss_fct = nn.CrossEntropyLoss()
-        
-    def forward(self,query,keys,queue):
-        target = torch.LongTensor([i for i in range(query.shape[0])]).cuda()
-
-        sim_matrix_pos = self.cos(query.unsqueeze(1),keys.unsqueeze(0))
-        sim_matrix_neg = self.cos(query.unsqueeze(1),queue.T.unsqueeze(0))
-        
-        sim_matrix = torch.cat((sim_matrix_pos,sim_matrix_neg),dim=1).cuda() / self.temp
-        
-        loss = self.loss_fct(sim_matrix,target)
-        return loss
-
-
-
-features_grad=0.0
-# Auxiliary functions defined to read the gradient of the intermediate parameter variables of the model
-def extract(g):
-    global features_grad
-    features_grad = g
-
-def fgsm_attack(embeddings,epsilon,gradient,mean=0.5,std=0.1):
-    try:
-        # No gradient in the first run
-        neg_grad = gradient.sign()
-    except:
-        return embeddings
-    else:
-        perturbed_embeddings = embeddings + epsilon*neg_grad#*random_choice
-        return perturbed_embeddings
-
-
-def position_ids_shuffle(position_ids):
-    position_ids_shuffle = torch.zeros_like(position_ids)
-    for i in range(position_ids.shape[0]):
-        index_tensor = torch.randperm(position_ids[i].nelement())
-        for index_i,element in enumerate(index_tensor):
-            position_ids_shuffle[i][element] = position_ids[i][index_i]
-    return position_ids_shuffle
-
-
-def token_cut_off(inputs_embeds,seq_length,prob=0.1):
-    for i in range(inputs_embeds.shape[0]):
-        cut_size = max(1,int(seq_length * prob))
-        cut_index_list = random.sample([i for i in range(seq_length)],cut_size)
-        for cut_index in cut_index_list:
-            inputs_embeds[i][cut_index].fill_(0)
-    return inputs_embeds
-
-
-def feature_cut_off(inputs_embeds,prob=0.01):
-    for i in range(inputs_embeds.shape[0]):
-        cut_size = max(1,int(inputs_embeds.shape[2] * prob))
-        cut_index_list = random.sample([i for i in range(inputs_embeds.shape[2])],cut_size)
-        for cut_index in cut_index_list:
-            inputs_embeds[i][:,cut_index].fill_(0)
-    return inputs_embeds
-
-def get_sent_ids(origin_ids,mask):
-    origin_sent = [i.item() for i,j in zip(origin_ids,mask) if j.item() != 0]
-    if origin_sent[-1] == 102:
-        origin_sent = origin_sent[:-1]
-    return origin_sent[1:]
-
-def get_origin_text(untokenizer,origin_sent):
-    origin_sent_untokenizer = [untokenizer[i] for i in origin_sent]
-    origin_sts = ' '.join(origin_sent_untokenizer)
-    return origin_sts
-
-def aug_and_tokenizer(tokenizer, origin_sts,aug_model):
-    aug_text = aug_model.augment(origin_sts)
-    aug_tokenizer = tokenizer(aug_text, padding='max_length',max_length = 32,truncation = True)
-    return aug_tokenizer
 
 class MoCoSEEmbeddings(nn.Module):
     """Construct the embeddings from word, position and token_type embeddings."""
@@ -260,35 +108,12 @@ class MoCoSEEmbeddings(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.word_embeddings(input_ids)
             
-        if not sent_emb and self.config.fgsm > 0:
-            try:
-                inputs_embeds.register_hook(extract)
-            except:
-                pass
-            else:
-                inputs_embeds = fgsm_attack(inputs_embeds,self.config.fgsm,features_grad)
-        
-        if not sent_emb:
-            # token cut off
-            if self.config.token_drop_prob > 0:
-                inputs_embeds = token_cut_off(inputs_embeds,seq_length,prob = self.config.token_drop_prob)
-            # feature cut off
-            if self.config.feature_drop_prob > 0:
-                inputs_embeds = feature_cut_off(inputs_embeds,prob = self.config.feature_drop_prob)
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = inputs_embeds + token_type_embeddings
-        if self.position_embedding_type == "absolute":
-            # position shuffle
-            if self.config.token_shuffle:
-                if not sent_emb:
-                    position_embeddings = self.position_embeddings(position_ids_shuffle(position_ids))
-                else:
-                    position_embeddings = self.position_embeddings(position_ids)
-            else:
-                position_embeddings = self.position_embeddings(position_ids)
-            embeddings += position_embeddings
+        position_embeddings = self.position_embeddings(position_ids)
+        embeddings += position_embeddings
         embeddings = self.LayerNorm(embeddings)
     
         # drop out
@@ -297,7 +122,7 @@ class MoCoSEEmbeddings(nn.Module):
         return embeddings
 
 
-class MoCoSEModel(BertPreTrainedModel):
+class BarlowTwins(BertPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.decay = config.ema_decay
@@ -307,86 +132,11 @@ class MoCoSEModel(BertPreTrainedModel):
         self.online_embeddings = MoCoSEEmbeddings(config)
         self.online_encoder = BertEncoder(config)
         self.online_pooler = PoolerWithoutActive(config)
-        self.online_projection = ProjectionLayer(config)
         self.bn = nn.BatchNorm1d(config.out_size, affine=False)
-        self.predictor = MLP(config)
         self.loss_fct = loss_fn
         self.init_weights()
 
-        # add text aug
-        ################## different augumentation experiment ######################
-        if self.contextual_wordembs_aug:
-            with open( PATH_NOW +r'/bert-base-uncased-weights/vocab.txt','r',encoding='utf8') as f:
-                test_untokenizer = f.readlines()
-            self.untokenizer = [i[:-1] for i in test_untokenizer]
-            self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-            if config.text_aug_type == 'cwea':
-                self.aug = naw.ContextualWordEmbsAug(model_path='roberta-base', action="insert", device='cuda')
-            elif config.text_aug_type == 'spa':
-                self.aug = naw.SpellingAug()
-            elif config.text_aug_type == 'cwesa':
-                self.aug = nas.ContextualWordEmbsForSentenceAug(model_path='xlnet-base-cased', device='cuda')
-            elif config.text_aug_type == 'bta':
-                self.aug = naw.BackTranslationAug(from_model_name='facebook/wmt19-en-de', to_model_name='facebook/wmt19-de-en', device='cuda')
-        ###########################################################################
 
-        # create the queue 
-        self.register_buffer("queue", torch.randn(config.out_size, config.K))
-        # self.register_buffer("queue", torch.randn(config.out_size, config.K_start))
-        self.queue_size = config.K_start
-        self.queue = nn.functional.normalize(self.queue, dim=0)
-
-        ################## for negative sample similarity experiment ######################
-        # self.cka_fun = CKA()
-        # self.queue_avg_cka = 0.0 
-        # self.avg_pearson = 0.0
-        # self.queue_avg_relation = 0.0
-        # self.enqueue_threshold = 0
-        # self.skip_counts = 0
-        ###################################################################################
-
-        # age test?
-        self.age_test = config.age_test
-        self.neg_queue_slice_span = config.neg_queue_slice_span
-        
-
-        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
-        self.prepare()
-        
-    def prepare(self):
-        #self.target_embeddings = EMA(self.online_embeddings, decay = self.decay)
-        self.target_encoder = EMA(self.online_encoder,decay = self.decay)
-        self.target_pooler = EMA(self.online_pooler,decay = self.decay)
-        self.target_projection = EMA(self.online_projection,decay = self.decay)
-
-    def get_queue_avg_cka(self):
-        return self.queue_avg_cka
-
-    def get_input_embeddings(self):
-        return self.embeddings.word_embeddings
-
-    def set_input_embeddings(self, value):
-        self.embeddings.word_embeddings = value
-
-    def _prune_heads(self, heads_to_prune):
-        """
-        Prunes heads of the model. heads_to_prune: dict of {layer_num: list of heads to prune in this layer} See base
-        class PreTrainedModel
-        """
-        for layer, heads in heads_to_prune.items():
-            self.encoder.layer[layer].attention.prune_heads(heads)
-    
-
-    def dequeue_and_enqueue(self,keys):
-        with torch.no_grad():
-            if self.queue_size == 0:
-                self.queue = keys.detach().T
-                self.queue_size += keys.shape[0]
-            else:
-                self.queue = torch.cat((keys.detach().T,self.queue),dim=1)
-                self.queue_size += keys.shape[0]
-                if self.queue_size > self.K:
-                    self.queue = self.queue[:,0:self.K]
     
     def forward(
         self,
@@ -417,15 +167,7 @@ class MoCoSEModel(BertPreTrainedModel):
             input_ids = input_ids[:,0]
             attention_mask = attention_mask[:,0]
             token_type_ids = token_type_ids[:,0]
-            if self.contextual_wordembs_aug:
-                temp_ids = [get_sent_ids(ids,mask) for (ids,mask) in zip(input_ids,attention_mask)]
-                temp_text = [get_origin_text(self.untokenizer,ids) for ids in temp_ids]
-                #temp_sent = [tokenizer_func(aug_text_func(untokenizer,sent,aug)) for sent in temp_ids]
-                temp_data = aug_and_tokenizer(self.tokenizer, temp_text, self.aug)
-                aug_input_ids = torch.LongTensor(temp_data['input_ids']).cuda()
-                aug_attention_mask = torch.LongTensor(temp_data['attention_mask']).cuda()
-                aug_token_type_ids = torch.LongTensor(temp_data['token_type_ids']).cuda()
-        
+                  
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -462,9 +204,6 @@ class MoCoSEModel(BertPreTrainedModel):
         # ourselves in which case we just need to make it broadcastable to all heads.
         extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape, device)
 
-        # for text aug
-        if self.contextual_wordembs_aug and not sent_emb:
-            aug_extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(aug_attention_mask, input_shape, device)
 
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
@@ -476,12 +215,6 @@ class MoCoSEModel(BertPreTrainedModel):
             encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
         else:
             encoder_extended_attention_mask = None
-
-        # Prepare head mask if needed
-        # 1.0 in head_mask indicate we keep the head
-        # attention_probs has shape bsz x n_heads x N x N
-        # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
-        # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
         
         # Embedding
@@ -514,24 +247,13 @@ class MoCoSEModel(BertPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
        
-        if self.contextual_wordembs_aug:
-            # using contextual word embedding augumentations
-            view2 = self.online_embeddings(
-                input_ids=aug_input_ids,
-                position_ids=position_ids,
-                token_type_ids=aug_token_type_ids,
-                inputs_embeds=inputs_embeds,
-                past_key_values_length=past_key_values_length,
-                #sent_emb=sent_emb
-            )
-        else:
-            view2 = self.online_embeddings(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                token_type_ids=token_type_ids,
-                inputs_embeds=inputs_embeds,
-                past_key_values_length=past_key_values_length,
-                #sent_emb=sent_emb
+
+        view2 = self.online_embeddings(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            token_type_ids=token_type_ids,
+            inputs_embeds=inputs_embeds,
+            past_key_values_length=past_key_values_length,
         )             
         
         # Encoder
@@ -567,21 +289,13 @@ class MoCoSEModel(BertPreTrainedModel):
         attention_online_out_2 = view_online_2[0]
     
         # 进行pooler
-        proj_online_1 = self.online_pooler(attention_online_out_1)
-        proj_online_2 = self.online_pooler(attention_online_out_2)
+        p1 = self.online_pooler(attention_online_out_1)
+        p2 = self.online_pooler(attention_online_out_2)
 
-
-
-        # 进行 project
-        p1 = self.online_projection(proj_online_1)
-        p2 = self.online_projection(proj_online_2)
 
         c = self.bn(p1).T @ self.bn(p2)
-        # sum the cross-correlation matrix between all gpus
-        c.div_(256)
+        c.div_(p1.shape[0])
        
-
-
         # set pooler output
         view_online_1.pooler_output = p1
         view_online_2.pooler_output = p2

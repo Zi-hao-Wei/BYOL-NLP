@@ -59,12 +59,12 @@ class ProjectionLayer(nn.Module):
         for i in range(config.proj_layers-1):
             self.proj.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
             self.proj.add_module("relu_"+str(i),nn.ReLU())
-            self.proj.add_module("layer_norm"+str(i),nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps))
+            self.proj.add_module("layer_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
             self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
         
         self.relu = nn.ReLU()        
         self.dense = nn.Linear(config.hidden_size, config.out_size)
-        self.Batchnorm = nn.BatchNorm1d(config.out_size)
+        self.Batchnorm = MaskBatchNorm(config.out_size)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
     
     def forward(self, x, **kwargs):
@@ -74,7 +74,6 @@ class ProjectionLayer(nn.Module):
         x = self.dense(x)
         x = self.relu(x)
         x = self.Batchnorm(x)
-        x = self.dropout(x)
     
         return x
 
@@ -89,12 +88,12 @@ class MLP(nn.Module):
         self.mlp=nn.Sequential()
         for i in range(config.mlp_layers-1):
             self.mlp.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
-            self.mlp.add_module("layer_norm"+str(i),nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps))
-            self.mlp.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
             self.mlp.add_module("relu_"+str(i),nn.ReLU())
+            self.mlp.add_module("layer_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
+            self.mlp.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
         
         self.dense = nn.Linear(config.out_size, config.out_size)
-        self.Batchnorm = nn.BatchNorm1d(config.out_size)
+        self.Batchnorm = MaskBatchNorm(config.out_size,eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.relu = nn.ReLU()
 
@@ -105,7 +104,6 @@ class MLP(nn.Module):
         x = self.dense(x)
         x = self.relu(x)
         x = self.Batchnorm(x)
-        x = self.dropout(x)
         
         return x
 
@@ -113,7 +111,8 @@ class PoolerWithoutActive(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-
+        self.relu = nn.ReLU()
+        self.l2 = nn.Linear(config.hidden_size, config.hidden_size)
     def forward(self, hidden_states,  pooling="cls"):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
@@ -126,9 +125,10 @@ class PoolerWithoutActive(nn.Module):
             pooled=hidden_states[:,-1].mean(dim=1) + hidden_states[:,1].mean(dim=1)
         else:
             pooled=hidden_states[:,-1].mean(dim=1) + hidden_states[:,-2].mean(dim=1)
-        pooled_output = self.dense(pooled)
-        
-        return pooled_output
+        x = self.dense(pooled)
+        x=self.relu(x)
+        x=self.l2(x)
+        return x
 
 
 def loss_fn(x, y):
@@ -640,7 +640,7 @@ class MoCoSEModel(BertPreTrainedModel):
         proj_online_1 = self.online_pooler(attention_online_out_1)
         proj_online_2 = self.online_pooler(attention_online_out_2)
 
-        c = proj_online_1.T @ proj_online_2
+        c = self.bn(proj_online_1).T @ self.bn(proj_online_2)
         # sum the cross-correlation matrix between all gpus
         c.div_(proj_online_1.shape[0])
         loss1=loss_fn_bar(c).mean()
@@ -648,6 +648,8 @@ class MoCoSEModel(BertPreTrainedModel):
         # 进行 project
         proj_online_1 = self.online_projection(proj_online_1)
         proj_online_2 = self.online_projection(proj_online_2)
+
+        
 
         # prediction
         online_out_1 = self.predictor(proj_online_1)
@@ -659,8 +661,8 @@ class MoCoSEModel(BertPreTrainedModel):
             proj_target_2 = self.target_pooler.model(attention_target_out_2)
             proj_target_1 = self.target_projection.model(proj_target_1)
             proj_target_2 = self.target_projection.model(proj_target_2)
-            target_out_1 = proj_target_1.detach_()
-            target_out_2 = proj_target_2.detach_()
+            target_out_1 = proj_target_1.detach()
+            target_out_2 = proj_target_2.detach()
 
         # set pooler output
         view_online_1.pooler_output = online_out_1
@@ -670,11 +672,11 @@ class MoCoSEModel(BertPreTrainedModel):
 
         loss2 = self.loss_fct(online_out_1,target_out_2.detach())+self.loss_fct(online_out_2,target_out_1.detach())
         loss2=loss2.mean()
-        loss=None
-        if self.counter<500:
-            loss = loss1+ 0.1*loss2
-        else:
-            loss = loss2+ 0.1*loss1
+        # loss=None
+        # if self.counter<500:
+        loss = loss1+ 0.1*loss2
+        # else:
+            # loss = loss2+ 0.1*loss1
         self.counter+=1
         return SequenceClassifierOutput(
             loss=loss,
