@@ -60,7 +60,7 @@ class ProjectionLayer(nn.Module):
         for i in range(config.proj_layers-1):
             self.proj.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
             self.proj.add_module("relu_"+str(i),nn.ReLU())
-            self.proj.add_module("batch_norm"+str(i),nn.LayerNorm(config.hidden_size))
+            self.proj.add_module("layer_norm"+str(i),nn.LayerNorm(config.hidden_size))
             self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
             
         
@@ -308,7 +308,7 @@ class MoCoSEModel(BertPreTrainedModel):
         self.online_encoder = BertEncoder(config)
         self.online_pooler = PoolerWithoutActive(config)
         self.online_projection = ProjectionLayer(config)
-        self.bn = nn.BatchNorm1d(config.hidden_size, affine=False)
+        self.bn = nn.BatchNorm1d(config.out_size, affine=False)
         self.predictor = MLP(config)
         self.loss_fct = loss_fn
         self.init_weights()

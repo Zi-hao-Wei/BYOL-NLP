@@ -299,7 +299,8 @@ class MoCoSEModel(BertPreTrainedModel):
         self.prodiction = MLP(config)
         self.loss_fct = InfoNCEWithQueue()
         self.init_weights()
-
+        self.counter=0
+        self.loss_rate=CosineLoss()
         # add text aug
         ################## different augumentation experiment ######################
         if self.contextual_wordembs_aug:
@@ -587,28 +588,28 @@ class MoCoSEModel(BertPreTrainedModel):
         # sum the cross-correlation matrix between all gpus
         c.div_(proj_online.shape[0])
 
-        print(c)
+        print(self.counter,c)
         loss1=loss_fn_bar(c).mean()
-
+        
         # Experiment of using negative samples with different 'age'
         if self.age_test:
             # if self.queue_size < 1024:
             #     loss = self.loss_fct(online_out,target_out,self.queue.clone().detach())
             if self.queue_size+self.K_start < self.K:
-                loss = self.loss_fct(online_out,target_out,self.queue[:,0:self.queue_size+self.K_start].clone().detach())+1.25*loss1
+                loss = self.loss_fct(online_out,target_out,self.queue[:,0:self.queue_size+self.K_start].clone().detach())+ self.loss_rate.get_lr(self.counter)*loss1
             else:
                 # queue_without_middle = torch.cat((self.queue[:,0:self.neg_queue_slice_span],self.queue[:,(self.K - self.neg_queue_slice_span):self.K]), dim=1).clone().detach()
                 queue_with_middle = self.queue[:,0:2*self.neg_queue_slice_span].clone().detach()
                 # a = torch.cat((self.queue[:,0:1*self.K_start],self.queue[:,2*self.K_start:3*self.K_start]), dim=1)
                 # b = torch.cat((a, self.queue[:,4*self.K_start:5*self.K_start]), dim=1)
                 # queue_with_jump = torch.cat((b, self.queue[:,6*self.K_start:7*self.K_start]), dim=1).clone().detach()
-                loss = self.loss_fct(online_out,target_out,queue_with_middle)++1.25*loss1
+                loss = self.loss_fct(online_out,target_out,queue_with_middle)+self.loss_rate.get_lr(self.counter)*loss1
         else:
             if self.queue_size+self.K_start < self.K:
-                loss = self.loss_fct(online_out,target_out,self.queue[:,0:self.queue_size+self.K_start].clone().detach())+1.25*loss1
+                loss = self.loss_fct(online_out,target_out,self.queue[:,0:self.queue_size+self.K_start].clone().detach())+self.loss_rate.get_lr(self.counter)*loss1
             else:
-                loss = self.loss_fct(online_out,target_out,self.queue.clone().detach())+1.25*loss1
-
+                loss = self.loss_fct(online_out,target_out,self.queue.clone().detach())+self.loss_rate.get_lr(self.counter)*loss1
+        self.counter+=1
         ### add cka test
         # first is target_out needed to pushed into queue
         # second is the average cka already in the queue
@@ -639,3 +640,36 @@ class MoCoSEModel(BertPreTrainedModel):
         )
         
 
+import math
+class CosineLoss():
+    '''
+    Cosine lr decay function with warmup.
+    Ref: https://github.com/PistonY/torch-toolbox/blob/master/torchtoolbox/optimizer/lr_scheduler.py
+         https://github.com/Randl/MobileNetV3-pytorch/blob/master/cosine_with_warmup.py
+    Lr warmup is proposed by 
+        `Accurate, Large Minibatch SGD:Training ImageNet in 1 Hour`
+        `https://arxiv.org/pdf/1706.02677.pdf`
+    Cosine decay is proposed by 
+        `Stochastic Gradient Descent with Warm Restarts`
+        `https://arxiv.org/abs/1608.03983`
+    Args:
+        optimizer (Optimizer): optimizer of a model.
+        iter_in_one_epoch (int): number of iterations in one epoch.
+        epochs (int): number of epochs to train.
+        lr_min (float): minimum(final) lr.
+        warmup_epochs (int): warmup epochs before cosine decay.
+        last_epoch (int): init iteration. In truth, this is last_iter
+    Attributes:
+        niters (int): number of iterations of all epochs.
+        warmup_iters (int): number of iterations of all warmup epochs.
+        cosine_iters (int): number of iterations of all cosine epochs.
+    '''
+
+    def __init__(self, lr_min=0.1,base_lr=0.5):
+        self.lr_min = lr_min
+        self.base_lr=base_lr
+        self.cosine_iters=100
+    def get_lr(self,iter):
+        lr= (self.lr_min + (self.base_lr - self.lr_min) * (1 + math.cos(math.pi * (iter) / self.cosine_iters)) / 2)
+        print(lr)
+        return lr

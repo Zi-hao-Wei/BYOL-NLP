@@ -5,7 +5,7 @@ import pandas as pd
 from torch.utils.data import DataLoader
 import torch
 # from simsiam import *
-from mocose import *
+from barlowtwins import *
 
 from transformers import BertConfig
 from mocose_tools import MoCoSETrainer, PATH_NOW
@@ -19,12 +19,12 @@ train_dataset = load_from_disk(PATH_NOW+"/wiki_for_sts_32")
 train_loader = DataLoader(train_dataset, batch_size=batch_size, drop_last = True)
 
 config = BertConfig()
-config.out_size=768
+config.out_size=2048
 config.mlp_layers=3
 config.proj_layers=2
 
 config.fgsm = 5e-9
-config.embedding_drop_prob = 0.1
+config.embedding_drop_prob = 0.2
 config.hidden_dropout_prob=0.1
 config.attention_probs_dropout_prob=0.1
 config.token_drop_prob = 0
@@ -36,7 +36,7 @@ config.age_test = False
 
 config.K = 256
 config.K_start = 128
-config.ema_decay = 0.75
+config.ema_decay = 0.85
 
 
 config.neg_queue_slice_span = 256 # euqal to batch size, won't work if age_test=False
@@ -107,7 +107,7 @@ args = TrainingArguments(
     evaluation_strategy   = "steps",
     eval_steps            = 100,
     learning_rate         = 3e-4,
-    # warmup_ratio=0.3,
+    warmup_ratio=0.3,
     num_train_epochs      = 1.0,
     weight_decay          = 1e-6,
     per_device_train_batch_size = 256,
