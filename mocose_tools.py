@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 PATH_NOW="."
 
 # Set path to SentEval
-PATH_TO_SENTEVAL = PATH_NOW+'\\SentEval'
-PATH_TO_DATA = PATH_NOW+'\\SentEval\\data'
+PATH_TO_SENTEVAL = PATH_NOW+'/SentEval'
+PATH_TO_DATA = PATH_NOW+'/SentEval/data'
 
 # Import SentEval
 sys.path.insert(0, PATH_TO_SENTEVAL)

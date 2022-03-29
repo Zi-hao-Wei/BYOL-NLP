@@ -26,7 +26,7 @@ import nlpaug.augmenter.sentence as nas
 from maskBatchNorm import MaskBatchNorm
 logger = logging.getLogger(__name__)
 from powerNorm import MaskPowerNorm
-
+from mocose_tools import PATH_NOW
 class EMA(torch.nn.Module):
     """
     [https://www.tensorflow.org/api_docs/python/tf/train/ExponentialMovingAverage]
@@ -62,27 +62,22 @@ class ProjectionLayer(nn.Module):
         #     self.proj.append(nn.Dropout(config.hidden_dropout_prob)
         for i in range(config.proj_layers-1):
             self.proj.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
-            self.proj.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
-            self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
             self.proj.add_module("relu_"+str(i),nn.ReLU())
+            self.proj.add_module("batch_norm"+str(i),nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps))
+            self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
         
         self.relu = nn.ReLU()        
         self.dense = nn.Linear(config.hidden_size, config.out_size)
-        self.BatchNorm = MaskBatchNorm(config.out_size, eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.out_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
     
     def forward(self, x, **kwargs):
         if self.proj_layers > 1:
-            # for i in range(self.config.proj_layers-1):
-            #     x = self.proj[3*i](x)
-            #     x = self.proj[3*i+1](x)
-            #     x = self.proj[3*i+2](x)
-            #     x = self.relu(x)
             x=self.proj(x)
 
         if self.proj_layers > 0:
             x = self.dense(x)
-            x = self.BatchNorm(x)
+            x = self.LayerNorm(x)
             x = self.dropout(x)
         
         return x
@@ -108,11 +103,6 @@ class MLP(nn.Module):
 
     def forward(self, x, **kwargs):
         if self.mlp_layers > 1:
-            # for i in range(self.config.proj_layers-1):
-            #     x = self.proj[3*i](x)
-            #     x = self.proj[3*i+1](x)
-            #     x = self.proj[3*i+2](x)
-            #     x = self.relu(x)
             x=self.mlp(x)
         x = self.dense(x)
         x = self.activation(x)
@@ -137,18 +127,22 @@ class PoolerWithoutActive(nn.Module):
         return pooled_output
 
 
-def loss_fn(p, z, version='simplified'): # negative cosine similarity
-    if version == 'original':
-        z = z.detach() # stop gradient
-        p = F.normalize(p, dim=1) # l2-normalize 
-        z = F.normalize(z, dim=1) # l2-normalize 
-        return -(p*z).sum(dim=1).mean()
+def loss_fn(x, y):
+    x = F.normalize(x, dim=-1, p=2)
+    y = F.normalize(y, dim=-1, p=2)
+    return 2 - 2 * (x * y).sum(dim=-1)
 
-    elif version == 'simplified':# same thing, much faster. Scroll down, speed test in __main__
-        return - F.cosine_similarity(p, z.detach(), dim=-1).mean()
-    else:
-        raise Exception
+def off_diagonal(x):
+    # return a flattened view of the off-diagonal elements of a square matrix
+    n, m = x.shape
+    assert n == m
+    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
+def loss_fn_bar(c): 
+    on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+    off_diag = off_diagonal(c).pow_(2).sum()
+    loss = on_diag + 0.0051* off_diag
+    return loss
 
 class InfoNCEWithQueue(nn.Module):
     def __init__(self,temp=0.05):
@@ -203,6 +197,7 @@ def token_cut_off(inputs_embeds,seq_length,prob=0.1):
         for cut_index in cut_index_list:
             inputs_embeds[i][cut_index].fill_(0)
     return inputs_embeds
+
 
 
 def feature_cut_off(inputs_embeds,prob=0.01):
@@ -306,6 +301,7 @@ class MoCoSEEmbeddings(nn.Module):
         # drop out
         if not sent_emb:
             embeddings = self.dropout(embeddings)
+            # embeddings = self.dropout(embeddings)
         return embeddings
 
 
@@ -320,7 +316,7 @@ class MoCoSEModel(BertPreTrainedModel):
         self.online_encoder = BertEncoder(config)
         self.online_pooler = PoolerWithoutActive(config)
         self.online_projection = ProjectionLayer(config)
-        
+        self.bn = nn.BatchNorm1d(config.hidden_size, affine=False)
         self.predictor = MLP(config)
         self.loss_fct = loss_fn
         self.init_weights()
@@ -328,7 +324,7 @@ class MoCoSEModel(BertPreTrainedModel):
         # add text aug
         ################## different augumentation experiment ######################
         if self.contextual_wordembs_aug:
-            with open(r'F:\Experiment\MoCoSE\codes\pretrained_bert\bert-base-uncased\vocab.txt','r',encoding='utf8') as f:
+            with open(PATH_NOW+r'\bert-base-uncased-weights\vocab.txt','r',encoding='utf8') as f:
                 test_untokenizer = f.readlines()
             self.untokenizer = [i[:-1] for i in test_untokenizer]
             self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -525,7 +521,11 @@ class MoCoSEModel(BertPreTrainedModel):
        
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
-       
+        #self.online_embeddings.update(self.online_embeddings)
+        self.target_encoder.update(self.online_encoder)
+        self.target_pooler.update(self.online_pooler)
+        self.target_projection.update(self.online_projection)
+        
         if self.contextual_wordembs_aug:
             # using contextual word embedding augumentations
             view2 = self.online_embeddings(
@@ -545,7 +545,7 @@ class MoCoSEModel(BertPreTrainedModel):
                 past_key_values_length=past_key_values_length,
                 #sent_emb=sent_emb
         )             
-        
+
         # Encoder
         view_online_1 = self.online_encoder(
             view1,
@@ -573,35 +573,103 @@ class MoCoSEModel(BertPreTrainedModel):
             return_dict=return_dict,
         )
 
+        with torch.no_grad():
+            if self.contextual_wordembs_aug:
+                # using contextual word embedding augumentations
+                view_target_1 = self.target_encoder.model(
+                    view1,
+                    attention_mask=aug_extended_attention_mask,
+                    head_mask=head_mask,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_extended_attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+                view_target_2 = self.target_encoder.model(
+                    view2,
+                    attention_mask=aug_extended_attention_mask,
+                    head_mask=head_mask,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_extended_attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+            else:
+                view_target_1 = self.target_encoder.model(
+                    view1,
+                    attention_mask=extended_attention_mask,
+                    head_mask=head_mask,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_extended_attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+                view_target_2 = self.target_encoder.model(
+                    view2,
+                    attention_mask=extended_attention_mask,
+                    head_mask=head_mask,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_extended_attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
 
         # pooler
         attention_online_out_1 = view_online_1[0]
+        attention_target_out_1 = view_target_1[0]
         attention_online_out_2 = view_online_2[0]
-    
+        attention_target_out_2 = view_target_2[0]
         # 进行pooler
         proj_online_1 = self.online_pooler(attention_online_out_1)
         proj_online_2 = self.online_pooler(attention_online_out_2)
 
-
+        c = self.bn(proj_online_1).T @ self.bn(proj_online_2)
+        # sum the cross-correlation matrix between all gpus
+        c.div_(256)
+        print(c)
+        loss1=loss_fn_bar(c).mean()
 
         # 进行 project
-        p1 = self.online_projection(proj_online_1)
-        p2 = self.online_projection(proj_online_2)
+        proj_online_1 = self.online_projection(proj_online_1)
+        proj_online_2 = self.online_projection(proj_online_2)
 
         # prediction
-        z1 = self.predictor(proj_online_1)
-        z2 = self.predictor(proj_online_2)
+        online_out_1 = self.predictor(proj_online_1)
+        online_out_2 = self.predictor(proj_online_2)
 
+
+        with torch.no_grad():
+            proj_target_1 = self.target_pooler.model(attention_target_out_1)
+            proj_target_2 = self.target_pooler.model(attention_target_out_2)
+            proj_target_1 = self.target_projection.model(proj_target_1)
+            proj_target_2 = self.target_projection.model(proj_target_2)
+            target_out_1 = proj_target_1.detach_()
+            target_out_2 = proj_target_2.detach_()
 
         # set pooler output
-        view_online_1.pooler_output = p1
-        view_online_2.pooler_output = p2
+        view_online_1.pooler_output = online_out_1
+        view_target_1.pooler_output = target_out_1
+        view_online_2.pooler_output = online_out_2
+        view_target_2.pooler_output = target_out_2
 
-        loss = self.loss_fct(p1,z2)/2+self.loss_fct(p2,z1)/2
-        loss=loss.mean()
+        loss2 = self.loss_fct(online_out_1,target_out_2.detach())+self.loss_fct(online_out_2,target_out_1.detach())
+        loss2=loss2.mean()
+        loss=loss1+loss2
         return SequenceClassifierOutput(
             loss=loss,
-            hidden_states=[p1,p2, z1,z2],
+            hidden_states=[online_out_1,online_out_2, target_out_1,target_out_2],
             attentions=None,
         )   
         

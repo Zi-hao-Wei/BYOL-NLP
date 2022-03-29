@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 batch_size = 64
-train_dataset = load_from_disk(PATH_NOW+"\\wiki_for_sts_32")
+train_dataset = load_from_disk(PATH_NOW+"/wiki_for_sts_32")
 train_loader = DataLoader(train_dataset, batch_size=batch_size, drop_last = True)
 
 config = BertConfig()
@@ -24,7 +24,9 @@ config.mlp_layers=3
 config.proj_layers=2
 
 config.fgsm = 5e-9
-config.embedding_drop_prob = 0.2
+config.embedding_drop_prob = 0.1
+config.hidden_dropout_prob=0.1
+config.attention_probs_dropout_prob=0.1
 config.token_drop_prob = 0
 config.feature_drop_prob = 0
 config.token_shuffle = False
@@ -34,20 +36,20 @@ config.age_test = False
 
 config.K = 256
 config.K_start = 128
-config.ema_decay = 0.995
+config.ema_decay = 0.75
 
 
 config.neg_queue_slice_span = 256 # euqal to batch size, won't work if age_test=False
 
-with open(PATH_NOW+r'\bert-base-uncased-weights\vocab.txt','r',encoding='utf8') as f:
+with open(PATH_NOW+r'/bert-base-uncased-weights/vocab.txt','r',encoding='utf8') as f:
     test_untokenizer = f.readlines()
 untokenizer = [i[:-1] for i in test_untokenizer]
 config.untokenizer = untokenizer
 
 model = MoCoSEModel(config)
-model.online_embeddings.load_state_dict(torch.load(PATH_NOW+'\\bert-base-uncased-weights\\embeddings.pth'))
-model.online_encoder.load_state_dict(torch.load(PATH_NOW+'\\bert-base-uncased-weights\\encoder.pth'))
-model.online_pooler.dense.load_state_dict(torch.load(PATH_NOW+'\\bert-base-uncased-weights\\pooler_dense.pth'))
+model.online_embeddings.load_state_dict(torch.load(PATH_NOW+'/bert-base-uncased-weights/embeddings.pth'))
+model.online_encoder.load_state_dict(torch.load(PATH_NOW+'/bert-base-uncased-weights/encoder.pth'))
+model.online_pooler.dense.load_state_dict(torch.load(PATH_NOW+'/bert-base-uncased-weights/pooler_dense.pth'))
 
 model.prepare()
 model = model.cuda()
@@ -101,10 +103,11 @@ def get_unif(model, dataloader):
     return unif_all
 
 args = TrainingArguments(
-    output_dir = PATH_NOW+'\\trained_models\\mocose_base_out\\',
+    output_dir = PATH_NOW+'/trained_models/mocose_base_out/',
     evaluation_strategy   = "steps",
-    eval_steps            = 175,
-    learning_rate         = 1e-4,
+    eval_steps            = 100,
+    learning_rate         = 3e-4,
+    # warmup_ratio=0.3,
     num_train_epochs      = 1.0,
     weight_decay          = 1e-6,
     per_device_train_batch_size = 256,
