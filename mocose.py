@@ -56,6 +56,7 @@ class ProjectionLayer(nn.Module):
         
         for i in range(config.proj_layers-1):
             self.proj.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
+            self.proj.add_module("relu_"+str(i),nn.LeakyReLU(0.1))
             self.proj.add_module("layer_norm_"+str(i),nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps))
             self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
         
@@ -85,6 +86,7 @@ class MLP(nn.Module):
         self.mlp = nn.Sequential()
         for i in range(config.mlp_layers-1):
             self.mlp.add_module("mlp_"+str(i),nn.Linear(config.out_size, config.out_size))
+            self.mlp.add_module("relu_"+str(i),nn.LeakyReLU(0.1))
             self.mlp.add_module("layer_norm_"+str(i),nn.LayerNorm(config.out_size, eps=config.layer_norm_eps))
             self.mlp.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
         
@@ -109,6 +111,9 @@ class PoolerWithoutActive(nn.Module):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
         first_token_tensor = hidden_states[:, 0]
+        # print(hidden_states.shape)
+        # first_token_tensor=hidden_states.permute(0,2,1)[:,:,1:].mean(dim=2)
+        # print(first_token_tensor.shape,hidden_states[:,0].shape)
         pooled_output = self.dense(first_token_tensor)
         return pooled_output
 

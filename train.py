@@ -110,6 +110,7 @@ args = TrainingArguments(
     warmup_ratio=0.3,
     num_train_epochs      = 1.0,
     weight_decay          = 1e-6,
+    # warmup_ratio=0.1,
     per_device_train_batch_size = 256,
     per_device_eval_batch_size  = 256,
     dataloader_drop_last = True,
