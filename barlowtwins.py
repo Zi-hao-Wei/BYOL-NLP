@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from transformers.models.bert.modeling_bert import (
     BertEncoder
 )
+from mocose_tools import PATH_NOW
 from transformers.file_utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
@@ -26,7 +27,7 @@ import nlpaug.augmenter.sentence as nas
 from maskBatchNorm import MaskBatchNorm
 logger = logging.getLogger(__name__)
 from powerNorm import MaskPowerNorm
-
+lambd=0.0051
 class EMA(torch.nn.Module):
     """
     [https://www.tensorflow.org/api_docs/python/tf/train/ExponentialMovingAverage]
@@ -56,33 +57,25 @@ class ProjectionLayer(nn.Module):
         self.proj_layers = config.proj_layers
         self.proj = nn.Sequential()
         self.config=config
-        # for i in range(config.proj_layers-1):
-        #     self.proj.append(nn.Linear(config.hidden_size, config.hidden_size))
-        #     self.proj.append(MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
-        #     self.proj.append(nn.Dropout(config.hidden_dropout_prob)
         for i in range(config.proj_layers-1):
             self.proj.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
-            self.proj.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
-            self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
             self.proj.add_module("relu_"+str(i),nn.ReLU())
+            self.proj.add_module("batch_norm"+str(i),nn.LayerNorm(config.hidden_size))
+            self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
+            
         
         self.relu = nn.ReLU()        
         self.dense = nn.Linear(config.hidden_size, config.out_size)
-        self.BatchNorm = MaskBatchNorm(config.out_size, eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.out_size)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
     
     def forward(self, x, **kwargs):
         if self.proj_layers > 1:
-            # for i in range(self.config.proj_layers-1):
-            #     x = self.proj[3*i](x)
-            #     x = self.proj[3*i+1](x)
-            #     x = self.proj[3*i+2](x)
-            #     x = self.relu(x)
             x=self.proj(x)
 
         if self.proj_layers > 0:
             x = self.dense(x)
-            x = self.BatchNorm(x)
+            x = self.LayerNorm(x)
             x = self.dropout(x)
         
         return x
@@ -98,9 +91,9 @@ class MLP(nn.Module):
         self.mlp=nn.Sequential()
         for i in range(config.mlp_layers-1):
             self.mlp.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
-            self.mlp.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
-            self.mlp.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
             self.mlp.add_module("relu_"+str(i),nn.ReLU())
+            self.mlp.add_module("batch_norm"+str(i),nn.BatchNorm1d(config.hidden_size))
+            self.mlp.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
         
         self.dense = nn.Linear(config.out_size, config.out_size)
         self.activation = nn.Tanh()
@@ -108,11 +101,6 @@ class MLP(nn.Module):
 
     def forward(self, x, **kwargs):
         if self.mlp_layers > 1:
-            # for i in range(self.config.proj_layers-1):
-            #     x = self.proj[3*i](x)
-            #     x = self.proj[3*i+1](x)
-            #     x = self.proj[3*i+2](x)
-            #     x = self.relu(x)
             x=self.mlp(x)
         x = self.dense(x)
         x = self.activation(x)
@@ -137,17 +125,17 @@ class PoolerWithoutActive(nn.Module):
         return pooled_output
 
 
-def loss_fn(p, z, version='simplified'): # negative cosine similarity
-    if version == 'original':
-        z = z.detach() # stop gradient
-        p = F.normalize(p, dim=1) # l2-normalize 
-        z = F.normalize(z, dim=1) # l2-normalize 
-        return -(p*z).sum(dim=1).mean()
+def off_diagonal(x):
+    # return a flattened view of the off-diagonal elements of a square matrix
+    n, m = x.shape
+    assert n == m
+    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
-    elif version == 'simplified':# same thing, much faster. Scroll down, speed test in __main__
-        return - F.cosine_similarity(p, z.detach(), dim=-1).mean()
-    else:
-        raise Exception
+def loss_fn(c): 
+    on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+    off_diag = off_diagonal(c).pow_(2).sum()
+    loss = on_diag + lambd * off_diag
+    return loss
 
 
 class InfoNCEWithQueue(nn.Module):
@@ -320,7 +308,7 @@ class MoCoSEModel(BertPreTrainedModel):
         self.online_encoder = BertEncoder(config)
         self.online_pooler = PoolerWithoutActive(config)
         self.online_projection = ProjectionLayer(config)
-        
+        self.bn = nn.BatchNorm1d(config.hidden_size, affine=False)
         self.predictor = MLP(config)
         self.loss_fct = loss_fn
         self.init_weights()
@@ -328,7 +316,7 @@ class MoCoSEModel(BertPreTrainedModel):
         # add text aug
         ################## different augumentation experiment ######################
         if self.contextual_wordembs_aug:
-            with open(r'F:\Experiment\MoCoSE\codes\pretrained_bert\bert-base-uncased\vocab.txt','r',encoding='utf8') as f:
+            with open( PATH_NOW +r'/bert-base-uncased-weights/vocab.txt','r',encoding='utf8') as f:
                 test_untokenizer = f.readlines()
             self.untokenizer = [i[:-1] for i in test_untokenizer]
             self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -588,20 +576,21 @@ class MoCoSEModel(BertPreTrainedModel):
         p1 = self.online_projection(proj_online_1)
         p2 = self.online_projection(proj_online_2)
 
-        # prediction
-        z1 = self.predictor(proj_online_1)
-        z2 = self.predictor(proj_online_2)
+        c = self.bn(p1).T @ self.bn(p2)
+        # sum the cross-correlation matrix between all gpus
+        c.div_(256)
+       
 
 
         # set pooler output
         view_online_1.pooler_output = p1
         view_online_2.pooler_output = p2
 
-        loss = self.loss_fct(p1,z2)/2+self.loss_fct(p2,z1)/2
+        loss = self.loss_fct(c)
         loss=loss.mean()
         return SequenceClassifierOutput(
             loss=loss,
-            hidden_states=[p1,p2, z1,z2],
+            hidden_states=[p1,p2],
             attentions=None,
         )   
         

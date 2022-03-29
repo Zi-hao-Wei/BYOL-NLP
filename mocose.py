@@ -9,7 +9,7 @@ from transformers import (
     BertPreTrainedModel,
     BertTokenizer,
 )
-import torch.nn.functional as F
+
 from transformers.models.bert.modeling_bert import (
     BertEncoder
 )
@@ -23,9 +23,8 @@ from transformers.modeling_outputs import (
 )
 import nlpaug.augmenter.word as naw
 import nlpaug.augmenter.sentence as nas
-from maskBatchNorm import MaskBatchNorm
 logger = logging.getLogger(__name__)
-from powerNorm import MaskPowerNorm
+from mocose_tools import PATH_NOW
 
 class EMA(torch.nn.Module):
     """
@@ -42,7 +41,6 @@ class EMA(torch.nn.Module):
     def update(self, model):
         self.step = self.step+1
         decay_new = 1-(1-self.decay)*(math.cos(math.pi*self.step/self.total_step)+1)/2
-        # 慢慢把self.model往model移动
         with torch.no_grad():
             e_std = self.model.state_dict().values()
             m_std = model.state_dict().values()
@@ -55,34 +53,23 @@ class ProjectionLayer(nn.Module):
         super().__init__()
         self.proj_layers = config.proj_layers
         self.proj = nn.Sequential()
-        self.config=config
-        # for i in range(config.proj_layers-1):
-        #     self.proj.append(nn.Linear(config.hidden_size, config.hidden_size))
-        #     self.proj.append(MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
-        #     self.proj.append(nn.Dropout(config.hidden_dropout_prob)
+        
         for i in range(config.proj_layers-1):
             self.proj.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
-            self.proj.add_module("relu_"+str(i),nn.ReLU()),
-            self.proj.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
+            self.proj.add_module("layer_norm_"+str(i),nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps))
             self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
         
-        self.relu = nn.ReLU()        
         self.dense = nn.Linear(config.hidden_size, config.out_size)
-        self.BatchNorm = MaskBatchNorm(config.out_size, eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.out_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
     
     def forward(self, x, **kwargs):
         if self.proj_layers > 1:
-            # for i in range(self.config.proj_layers-1):
-            #     x = self.proj[3*i](x)
-            #     x = self.proj[3*i+1](x)
-            #     x = self.proj[3*i+2](x)
-            #     x = self.relu(x)
-            x=self.proj(x)
-
+            x = self.proj(x)
+            
         if self.proj_layers > 0:
             x = self.dense(x)
-            x = self.BatchNorm(x)
+            x = self.LayerNorm(x)
             x = self.dropout(x)
         
         return x
@@ -95,25 +82,19 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.mlp_layers = config.mlp_layers
-        self.mlp=nn.Sequential()
+        self.mlp = nn.Sequential()
         for i in range(config.mlp_layers-1):
-            self.mlp.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
-            self.mlp.add_module("relu_"+str(i),nn.ReLU()),
-            self.mlp.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
+            self.mlp.add_module("mlp_"+str(i),nn.Linear(config.out_size, config.out_size))
+            self.mlp.add_module("layer_norm_"+str(i),nn.LayerNorm(config.out_size, eps=config.layer_norm_eps))
             self.mlp.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
         
         self.dense = nn.Linear(config.out_size, config.out_size)
         self.activation = nn.Tanh()
-        self.relu = nn.ReLU()
 
     def forward(self, x, **kwargs):
         if self.mlp_layers > 1:
-            # for i in range(self.config.proj_layers-1):
-            #     x = self.proj[3*i](x)
-            #     x = self.proj[3*i+1](x)
-            #     x = self.proj[3*i+2](x)
-            #     x = self.relu(x)
-            x=self.mlp(x)
+            x = self.mlp(x)
+        
         x = self.dense(x)
         x = self.activation(x)
         
@@ -124,9 +105,6 @@ class PoolerWithoutActive(nn.Module):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
 
-        # self.relu=nn.ReLU()
-        # self.dense2 = nn.Linear(config.hidden_size, config.hidden_size)
-
     def forward(self, hidden_states, **kwargs):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
@@ -135,15 +113,8 @@ class PoolerWithoutActive(nn.Module):
         # first_token_tensor=hidden_states.permute(0,2,1)[:,:,1:].mean(dim=2)
         # print(first_token_tensor.shape,hidden_states[:,0].shape)
         pooled_output = self.dense(first_token_tensor)
-        # x=self.relu(pooled_output)
-        # x=self.dense2(x)
         return pooled_output
 
-
-def loss_fn(x, y):
-    x = F.normalize(x, dim=-1, p=2)
-    y = F.normalize(y, dim=-1, p=2)
-    return 2 - 2 * (x * y).sum(dim=-1)
 
 class InfoNCEWithQueue(nn.Module):
     def __init__(self,temp=0.05):
@@ -200,7 +171,6 @@ def token_cut_off(inputs_embeds,seq_length,prob=0.1):
     return inputs_embeds
 
 
-
 def feature_cut_off(inputs_embeds,prob=0.01):
     for i in range(inputs_embeds.shape[0]):
         cut_size = max(1,int(inputs_embeds.shape[2] * prob))
@@ -224,6 +194,18 @@ def aug_and_tokenizer(tokenizer, origin_sts,aug_model):
     aug_text = aug_model.augment(origin_sts)
     aug_tokenizer = tokenizer(aug_text, padding='max_length',max_length = 32,truncation = True)
     return aug_tokenizer
+
+
+def off_diagonal(x):
+    # return a flattened view of the off-diagonal elements of a square matrix
+    n, m = x.shape
+    assert n == m
+    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+def loss_fn_bar(c): 
+    on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+    off_diag = off_diagonal(c).pow_(2).sum()
+    loss = on_diag + 0.0051* off_diag
+    return loss
 
 class MoCoSEEmbeddings(nn.Module):
     """Construct the embeddings from word, position and token_type embeddings."""
@@ -298,11 +280,10 @@ class MoCoSEEmbeddings(nn.Module):
                 position_embeddings = self.position_embeddings(position_ids)
             embeddings += position_embeddings
         embeddings = self.LayerNorm(embeddings)
-    
+        
         # drop out
         if not sent_emb:
             embeddings = self.dropout(embeddings)
-            # embeddings = self.dropout(embeddings)
         return embeddings
 
 
@@ -317,15 +298,15 @@ class MoCoSEModel(BertPreTrainedModel):
         self.online_encoder = BertEncoder(config)
         self.online_pooler = PoolerWithoutActive(config)
         self.online_projection = ProjectionLayer(config)
-        
-        self.predictor = MLP(config)
-        self.loss_fct = loss_fn
+        self.bn = nn.BatchNorm1d(config.hidden_size, affine=False)
+        self.prodiction = MLP(config)
+        self.loss_fct = InfoNCEWithQueue()
         self.init_weights()
 
         # add text aug
         ################## different augumentation experiment ######################
         if self.contextual_wordembs_aug:
-            with open(r'.\bert-base-uncased-weights\vocab.txt','r',encoding='utf8') as f:
+            with open(PATH_NOW+r'/bert-base-uncased-weights/vocab.txt','r',encoding='utf8') as f:
                 test_untokenizer = f.readlines()
             self.untokenizer = [i[:-1] for i in test_untokenizer]
             self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -494,7 +475,7 @@ class MoCoSEModel(BertPreTrainedModel):
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
         
         # Embedding
-        view1 = self.online_embeddings(
+        v_online = self.online_embeddings(
             input_ids=input_ids,
             position_ids=position_ids,
             token_type_ids=token_type_ids,
@@ -504,7 +485,7 @@ class MoCoSEModel(BertPreTrainedModel):
         )
         if sent_emb:
             attention_online = self.online_encoder(
-                view1,
+                v_online,
                 attention_mask=extended_attention_mask,
                 head_mask=head_mask,
                 encoder_hidden_states=encoder_hidden_states,
@@ -518,8 +499,6 @@ class MoCoSEModel(BertPreTrainedModel):
             attention_online_last = attention_online[0]
             cls_vec = self.online_pooler(attention_online_last)
             attention_online.pooler_output = cls_vec
-            # print(attention_online.pooler_output.shape)
-            # print(torch.std(attention_online.pooler_output,dim=0).mean())
             return attention_online
        
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
@@ -531,7 +510,7 @@ class MoCoSEModel(BertPreTrainedModel):
         
         if self.contextual_wordembs_aug:
             # using contextual word embedding augumentations
-            view2 = self.online_embeddings(
+            v_target = self.online_embeddings(
                 input_ids=aug_input_ids,
                 position_ids=position_ids,
                 token_type_ids=aug_token_type_ids,
@@ -540,19 +519,18 @@ class MoCoSEModel(BertPreTrainedModel):
                 #sent_emb=sent_emb
             )
         else:
-            view2 = self.online_embeddings(
+            v_target = self.online_embeddings(
                 input_ids=input_ids,
                 position_ids=position_ids,
                 token_type_ids=token_type_ids,
                 inputs_embeds=inputs_embeds,
                 past_key_values_length=past_key_values_length,
                 #sent_emb=sent_emb
-        )             
-        # print("VIEW Simiarity",F.cosine_similarity(view1,view2).mean())
-
+            )        
+        
         # Encoder
-        view_online_1 = self.online_encoder(
-            view1,
+        attention_online = self.online_encoder(
+            v_online,
             attention_mask=extended_attention_mask,
             head_mask=head_mask,
             encoder_hidden_states=encoder_hidden_states,
@@ -564,114 +542,103 @@ class MoCoSEModel(BertPreTrainedModel):
             return_dict=return_dict,
         )
 
-        view_online_2 = self.online_encoder(
-            view2,
-            attention_mask=extended_attention_mask,
-            head_mask=head_mask,
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_extended_attention_mask,
-            past_key_values=past_key_values,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-        # print("VIEW Simiarity Oneline",F.cosine_similarity(view_online_1[0],view_online_2[0]).mean())
-
-        with torch.no_grad():
-            if self.contextual_wordembs_aug:
-                # using contextual word embedding augumentations
-                view_target_1 = self.target_encoder.model(
-                    view1,
-                    attention_mask=aug_extended_attention_mask,
-                    head_mask=head_mask,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_extended_attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict,
-                )
-                view_target_2 = self.target_encoder.model(
-                    view2,
-                    attention_mask=aug_extended_attention_mask,
-                    head_mask=head_mask,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_extended_attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict,
-                )
-            else:
-                view_target_1 = self.target_encoder.model(
-                    view1,
-                    attention_mask=extended_attention_mask,
-                    head_mask=head_mask,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_extended_attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict,
-                )
-                view_target_2 = self.target_encoder.model(
-                    view2,
-                    attention_mask=extended_attention_mask,
-                    head_mask=head_mask,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_extended_attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict,
-                )
-        # print("VIEW Simiarity Target",F.cosine_similarity(view_online_1[0],view_target_1[0]).mean())
+        if self.contextual_wordembs_aug:
+            # using contextual word embedding augumentations
+            attention_target = self.target_encoder.model(
+                v_target,
+                attention_mask=aug_extended_attention_mask,
+                head_mask=head_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_extended_attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+        else:
+            attention_target = self.target_encoder.model(
+                v_target,
+                attention_mask=extended_attention_mask,
+                head_mask=head_mask,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_extended_attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
 
         # pooler
-        attention_online_out_1 = view_online_1[0]
-        attention_target_out_1 = view_target_1[0]
-        attention_online_out_2 = view_online_2[0]
-        attention_target_out_2 = view_target_2[0]
-        # 进行pooler
-        proj_online_1 = self.online_pooler(attention_online_out_1)
-        proj_online_2 = self.online_pooler(attention_online_out_2)
-
-
-
-        # 进行 project
-        proj_online_1 = self.online_projection(proj_online_1)
-        proj_online_2 = self.online_projection(proj_online_2)
-
+        attention_online_out = attention_online[0]
+        attention_target_out = attention_target[0]
+        # pooler
+        proj_online = self.online_pooler(attention_online_out)
+        proj_target = self.target_pooler.model(attention_target_out)
+        # project
+        proj_online = self.online_projection(proj_online)
+        proj_target = self.target_projection.model(proj_target)
         # prediction
-        online_out_1 = self.predictor(proj_online_1)
-        online_out_2 = self.predictor(proj_online_2)
-
-
-        with torch.no_grad():
-            proj_target_1 = self.target_pooler.model(attention_target_out_1)
-            proj_target_2 = self.target_pooler.model(attention_target_out_2)
-            proj_target_1 = self.target_projection.model(proj_target_1)
-            proj_target_2 = self.target_projection.model(proj_target_2)
-            target_out_1 = proj_target_1.detach_()
-            target_out_2 = proj_target_2.detach_()
-
+        online_out = self.prodiction(proj_online)
+        target_out = proj_target
         # set pooler output
-        view_online_1.pooler_output = online_out_1
-        view_target_1.pooler_output = target_out_1
-        view_online_2.pooler_output = online_out_2
-        view_target_2.pooler_output = target_out_2
+        attention_online.pooler_output = online_out
+        attention_target.pooler_output = target_out
+        
+        c = self.bn(proj_online).T @ self.bn(proj_target)
+        # sum the cross-correlation matrix between all gpus
+        c.div_(proj_online.shape[0])
 
-        loss = self.loss_fct(online_out_1,target_out_2.detach())+self.loss_fct(online_out_2,target_out_1.detach())
-        loss=loss.mean()
+        print(c)
+        loss1=loss_fn_bar(c).mean()
+
+        # Experiment of using negative samples with different 'age'
+        if self.age_test:
+            # if self.queue_size < 1024:
+            #     loss = self.loss_fct(online_out,target_out,self.queue.clone().detach())
+            if self.queue_size+self.K_start < self.K:
+                loss = self.loss_fct(online_out,target_out,self.queue[:,0:self.queue_size+self.K_start].clone().detach())+1.25*loss1
+            else:
+                # queue_without_middle = torch.cat((self.queue[:,0:self.neg_queue_slice_span],self.queue[:,(self.K - self.neg_queue_slice_span):self.K]), dim=1).clone().detach()
+                queue_with_middle = self.queue[:,0:2*self.neg_queue_slice_span].clone().detach()
+                # a = torch.cat((self.queue[:,0:1*self.K_start],self.queue[:,2*self.K_start:3*self.K_start]), dim=1)
+                # b = torch.cat((a, self.queue[:,4*self.K_start:5*self.K_start]), dim=1)
+                # queue_with_jump = torch.cat((b, self.queue[:,6*self.K_start:7*self.K_start]), dim=1).clone().detach()
+                loss = self.loss_fct(online_out,target_out,queue_with_middle)++1.25*loss1
+        else:
+            if self.queue_size+self.K_start < self.K:
+                loss = self.loss_fct(online_out,target_out,self.queue[:,0:self.queue_size+self.K_start].clone().detach())+1.25*loss1
+            else:
+                loss = self.loss_fct(online_out,target_out,self.queue.clone().detach())+1.25*loss1
+
+        ### add cka test
+        # first is target_out needed to pushed into queue
+        # second is the average cka already in the queue
+        # self.queue_avg_cka = self.cka_fun.kernel_CKA(target_out.T.detach().cpu(), self.queue.detach().cpu())
+        ### add cka test
+        #------add avg_cos_similarity------
+        # batch_similarity = 0.0
+        # count = 0
+        # for item in self.queue.T.detach():
+        #     for node in target_out.detach():
+        #         batch_similarity += pearsonr(node.cpu(),item.cpu())[0]
+        #         count += 1
+        # self.avg_pearson += (batch_similarity/count)
+        # ic(count, self.avg_pearson, batch_similarity)
+        #------add avg_cos_similarity------
+        # self.queue_avg_relation = torch.mean(torch.mm(nn.functional.normalize(target_out), nn.functional.normalize(self.queue)))
+        # if self.queue_avg_relation >= self.enqueue_threshold: # and (len(self.queue) != self.K):
+
+        self.dequeue_and_enqueue(target_out)
+        #     self.enqueue_threshold = self.queue_avg_relation
+        # else:
+        #     self.skip_counts += 1
+
         return SequenceClassifierOutput(
             loss=loss,
-            hidden_states=[online_out_1,online_out_2, target_out_1,target_out_2],
+            hidden_states=[online_out, target_out],
             attentions=None,
-        )   
+        )
         
 
