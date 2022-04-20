@@ -1,3 +1,5 @@
+from multiprocessing import pool
+from unittest import load_tests
 import torch
 import torch.nn as nn
 import random
@@ -29,26 +31,77 @@ logger = logging.getLogger(__name__)
 from powerNorm import MaskPowerNorm
 lambd=0.0051
 
+
+class EMA(torch.nn.Module):
+    """
+    [https://www.tensorflow.org/api_docs/python/tf/train/ExponentialMovingAverage]
+    """
+
+    def __init__(self, model, decay,total_step=15000):
+        super().__init__()
+        self.decay = decay
+        self.total_step = total_step
+        self.step = 0
+        self.model = copy.deepcopy(model).eval()
+
+    def update(self, model):
+        self.step = self.step+1
+        decay_new = 1-(1-self.decay)*(math.cos(math.pi*self.step/self.total_step)+1)/2
+        with torch.no_grad():
+            e_std = self.model.state_dict().values()
+            m_std = model.state_dict().values()
+            for e, m in zip(e_std, m_std):
+                e.copy_(decay_new * e + (1. - decay_new) * m)
+
 class PoolerWithoutActive(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.l1 = nn.Linear(config.hidden_size, config.hidden_size)
-        self.l2 = nn.Linear(config.hidden_size, config.out_size)
-        self.activation=nn.Tanh()
+        self.l1 = nn.Linear(config.hidden_size, config.out_size)
+        self.layernorm1=nn.LayerNorm(config.out_size)
+        self.layernorm2=nn.LayerNorm(config.out_size)
+
+        self.l2 = nn.Linear(config.out_size, config.out_size)
+        self.l3 = nn.Linear(config.out_size, config.out_size)
+
+        self.activation=nn.ReLU()
 
 
         # self.dense2 = nn.Linear(config.hidden_size, config.hidden_size)
 
-    def forward(self, hidden_states, **kwargs):
+    def forward(self, outputs, attention_mask, pooler_type="cls"):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
-        first_token_tensor = hidden_states[:, 0]
-        x = self.l1(first_token_tensor)
-        x=self.activation(x)
-        x=self.l2(x)
-        x=self.activation(x)
-
+        last_hidden = outputs.last_hidden_state
+        hidden_states = outputs.hidden_states
+        attention_mask=attention_mask.squeeze()
+        if pooler_type in ['cls_before_pooler', 'cls']:
+            pooled = last_hidden[:, 0]
+        elif pooler_type == "avg":
+            return ((last_hidden * attention_mask.unsqueeze(-1)).sum(1) / attention_mask.sum(-1).unsqueeze(-1))
+        elif pooler_type == "avg_first_last":
+            first_hidden = hidden_states[0].permute(0,2,1)
+            last_hidden = hidden_states[-1].permute(0,2,1)
+            pooled_result = (first_hidden.mean(dim=2) + last_hidden.mean(dim=2))/2
+            print(pooled_result)
+            return pooled_result
+        elif pooler_type == "avg_top2":
+            second_last_hidden = hidden_states[-2]
+            last_hidden = hidden_states[-1]
+            pooled_result = ((last_hidden + second_last_hidden) / 2.0 * attention_mask.unsqueeze(-1)).sum(1) / attention_mask.sum(-1).unsqueeze(-1)
+            return pooled_result
+        else:
+            raise NotImplementedError
+        x = self.l1(pooled)
+        x = self.activation(x)
+        x = self.layernorm1(x)
+        x = self.l2(x)
+        x = self.activation(x)
+        x = self.layernorm2(x)
+        x = self.l3(x)
         return x
+
+
+
 
 
 def off_diagonal(x):
@@ -73,7 +126,8 @@ class MoCoSEEmbeddings(nn.Module):
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
-
+        for param in self.word_embeddings.parameters():
+            param.requires_grad=False
         # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
         # any TensorFlow checkpoint file
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -119,6 +173,7 @@ class MoCoSEEmbeddings(nn.Module):
         # drop out
         if not sent_emb:
             embeddings = self.dropout(embeddings)
+        # embeddings = embeddings + torch.normal(0,0.1,size=embeddings.shape).cuda()
         return embeddings
 
 
@@ -134,9 +189,22 @@ class BarlowTwins(BertPreTrainedModel):
         self.online_pooler = PoolerWithoutActive(config)
         self.bn = nn.BatchNorm1d(config.out_size, affine=False)
         self.loss_fct = loss_fn
+        self.KLloss=nn.MSELoss()
         self.init_weights()
+        self.prepare()
 
+    def prepare(self):
+        self.target_encoder = EMA(self.online_encoder,decay = self.decay)
+        self.target_pooler = EMA(self.online_pooler,decay = self.decay)
+        for params in self.target_encoder.parameters():
+            params.requires_grad=False 
+        for params in self.target_pooler.parameters():
+            params.requires_grad=False 
 
+    def save(self):
+        torch.save(self.online_embeddings.state_dict(), "embeddings.pth")
+        torch.save(self.online_encoder.state_dict(), "encoder.pth")
+        torch.save(self.online_pooler.state_dict(), "pooler_dense.pth")
     
     def forward(
         self,
@@ -161,6 +229,8 @@ class BarlowTwins(BertPreTrainedModel):
             config.num_labels - 1]`. If :obj:`config.num_labels == 1` a regression loss is computed (Mean-Square loss),
             If :obj:`config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
+        # print(input_ids.shape)
+
         if sent_emb:
             pass
         else:
@@ -217,6 +287,7 @@ class BarlowTwins(BertPreTrainedModel):
             encoder_extended_attention_mask = None
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
         
+        self.online_embeddings.eval()
         # Embedding
         view1 = self.online_embeddings(
             input_ids=input_ids,
@@ -239,15 +310,17 @@ class BarlowTwins(BertPreTrainedModel):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-            attention_online_last = attention_online[0]
-            cls_vec = self.online_pooler(attention_online_last)
+            cls_vec = self.online_pooler(attention_online,extended_attention_mask)
+            # cls_vec = self.bn(cls_vec)
             attention_online.pooler_output = cls_vec
             return attention_online
        
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
-       
-
+        self.target_encoder.update(self.online_encoder)
+        self.target_pooler.update(self.online_pooler)
+    
+        self.online_embeddings.train()
         view2 = self.online_embeddings(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -257,6 +330,7 @@ class BarlowTwins(BertPreTrainedModel):
         )             
         
         # Encoder
+       
         view_online_1 = self.online_encoder(
             view1,
             attention_mask=extended_attention_mask,
@@ -270,7 +344,7 @@ class BarlowTwins(BertPreTrainedModel):
             return_dict=return_dict,
         )
 
-        view_online_2 = self.online_encoder(
+        view_online_2 = self.target_encoder(
             view2,
             attention_mask=extended_attention_mask,
             head_mask=head_mask,
@@ -283,25 +357,28 @@ class BarlowTwins(BertPreTrainedModel):
             return_dict=return_dict,
         )
 
-
-        # pooler
-        attention_online_out_1 = view_online_1[0]
-        attention_online_out_2 = view_online_2[0]
-    
+        loss2=F.cosine_similarity(view_online_1.last_hidden_state[:, 0],view_online_2.last_hidden_state[:, 0],dim=1)
+        loss2=-loss2.mean()
+        print(loss2)
         # 进行pooler
-        p1 = self.online_pooler(attention_online_out_1)
-        p2 = self.online_pooler(attention_online_out_2)
+        p1 = self.online_pooler(view_online_1,extended_attention_mask)
+        p2 = self.target_pooler(view_online_2,extended_attention_mask)
 
-
-        c = self.bn(p1).T @ self.bn(p2)
+        p1 = self.bn(p1)
+        p2 = self.bn(p2)
+  
+        c = p1.T @ p2
         c.div_(p1.shape[0])
-       
+        loss1 = self.loss_fct(c).mean()
         # set pooler output
         view_online_1.pooler_output = p1
         view_online_2.pooler_output = p2
 
-        loss = self.loss_fct(c)
-        loss=loss.mean()
+        print(loss1)
+        
+        loss=loss1+loss2
+        
+   
         return SequenceClassifierOutput(
             loss=loss,
             hidden_states=[p1,p2],

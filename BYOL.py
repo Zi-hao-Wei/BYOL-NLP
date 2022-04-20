@@ -32,12 +32,15 @@ class EMA(torch.nn.Module):
     [https://www.tensorflow.org/api_docs/python/tf/train/ExponentialMovingAverage]
     """
 
-    def __init__(self, model, decay,total_step=15000):
+    def __init__(self, model, decay,total_step=15000,eval=True):
         super().__init__()
         self.decay = decay
         self.total_step = total_step
         self.step = 0
-        self.model = copy.deepcopy(model).eval()
+        
+        self.model = copy.deepcopy(model)
+        if(eval):
+         self.model=self.model.eval()
 
     def update(self, model):
         self.step = self.step+1
@@ -62,13 +65,13 @@ class ProjectionLayer(nn.Module):
         #     self.proj.append(nn.Dropout(config.hidden_dropout_prob)
         for i in range(config.proj_layers-1):
             self.proj.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
-            self.proj.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
+            self.proj.add_module("batch_norm"+str(i),nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps))
             self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
             self.proj.add_module("relu_"+str(i),nn.ReLU())
         
         self.relu = nn.ReLU()        
         self.dense = nn.Linear(config.hidden_size, config.out_size)
-        self.BatchNorm = MaskBatchNorm(config.out_size, eps=config.layer_norm_eps)
+        self.BatchNorm = nn.LayerNorm(config.out_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
     
     def forward(self, x, **kwargs):
@@ -196,6 +199,17 @@ def token_cut_off(inputs_embeds,seq_length,prob=0.1):
             inputs_embeds[i][cut_index].fill_(0)
     return inputs_embeds
 
+def off_diagonal(x):
+    # return a flattened view of the off-diagonal elements of a square matrix
+    n, m = x.shape
+    assert n == m
+    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+
+def loss_fn_bar(c): 
+    on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+    off_diag = off_diagonal(c).pow_(2).sum()
+    loss = on_diag + 0.0051 * off_diag
+    return loss
 
 
 def feature_cut_off(inputs_embeds,prob=0.01):
@@ -299,11 +313,10 @@ class MoCoSEEmbeddings(nn.Module):
         # drop out
         if not sent_emb:
             embeddings = self.dropout(embeddings)
-            # embeddings = self.dropout(embeddings)
         return embeddings
 
 
-class MoCoSEModel(BertPreTrainedModel):
+class BYOL(BertPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.decay = config.ema_decay
@@ -314,7 +327,7 @@ class MoCoSEModel(BertPreTrainedModel):
         self.online_encoder = BertEncoder(config)
         self.online_pooler = PoolerWithoutActive(config)
         self.online_projection = ProjectionLayer(config)
-        
+        self.bn = nn.BatchNorm1d(config.out_size, affine=False)
         self.predictor = MLP(config)
         self.loss_fct = loss_fn
         self.init_weights()
@@ -358,9 +371,11 @@ class MoCoSEModel(BertPreTrainedModel):
 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
         self.prepare()
+        self.target_embeddings=copy.deepcopy(self.online_embeddings).eval()
         
     def prepare(self):
-        #self.target_embeddings = EMA(self.online_embeddings, decay = self.decay)
+        # self.target_embeddings=EMA(self.online_embeddings,decay = self.decay,eval=False)
+
         self.target_encoder = EMA(self.online_encoder,decay = self.decay)
         self.target_pooler = EMA(self.online_pooler,decay = self.decay)
         self.target_projection = EMA(self.online_projection,decay = self.decay)
@@ -515,13 +530,12 @@ class MoCoSEModel(BertPreTrainedModel):
             attention_online_last = attention_online[0]
             cls_vec = self.online_pooler(attention_online_last)
             attention_online.pooler_output = cls_vec
-            print(attention_online.pooler_output.shape)
-            print(torch.std(attention_online.pooler_output,dim=0).mean())
+            # print(attention_online.pooler_output.shape)
+            # print(torch.std(attention_online.pooler_output,dim=0).mean())
             return attention_online
        
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
-        #self.online_embeddings.update(self.online_embeddings)
         self.target_encoder.update(self.online_encoder)
         self.target_pooler.update(self.online_pooler)
         self.target_projection.update(self.online_projection)
@@ -545,7 +559,7 @@ class MoCoSEModel(BertPreTrainedModel):
                 past_key_values_length=past_key_values_length,
                 #sent_emb=sent_emb
         )             
-        print("VIEW Simiarity",F.cosine_similarity(view1,view2).mean())
+        # print("VIEW Simiarity",F.cosine_similarity(view1,view2).mean())
 
         # Encoder
         view_online_1 = self.online_encoder(
@@ -573,7 +587,7 @@ class MoCoSEModel(BertPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        print("VIEW Simiarity Oneline",F.cosine_similarity(view_online_1[0],view_online_2[0]).mean())
+        # print("VIEW Simiarity Oneline",F.cosine_similarity(view_online_1[0],view_online_2[0]).mean())
 
         with torch.no_grad():
             if self.contextual_wordembs_aug:
@@ -627,7 +641,7 @@ class MoCoSEModel(BertPreTrainedModel):
                     output_hidden_states=output_hidden_states,
                     return_dict=return_dict,
                 )
-        print("VIEW Simiarity Target",F.cosine_similarity(view_online_1[0],view_target_1[0]).mean())
+        # print("VIEW Simiarity Target",F.cosine_similarity(view_online_1[0],view_target_1[0]).mean())
 
         # pooler
         attention_online_out_1 = view_online_1[0]
@@ -637,8 +651,7 @@ class MoCoSEModel(BertPreTrainedModel):
         # 进行pooler
         proj_online_1 = self.online_pooler(attention_online_out_1)
         proj_online_2 = self.online_pooler(attention_online_out_2)
-
-
+        
 
         # 进行 project
         proj_online_1 = self.online_projection(proj_online_1)
@@ -656,18 +669,19 @@ class MoCoSEModel(BertPreTrainedModel):
             proj_target_2 = self.target_projection.model(proj_target_2)
             target_out_1 = proj_target_1.detach_()
             target_out_2 = proj_target_2.detach_()
+  
 
         # set pooler output
-        view_online_1.pooler_output = online_out_1
+        view_online_1.pooler_output = proj_online_1
         view_target_1.pooler_output = target_out_1
-        view_online_2.pooler_output = online_out_2
+        view_online_2.pooler_output = proj_online_2
         view_target_2.pooler_output = target_out_2
-
+# 
         loss = self.loss_fct(online_out_1,target_out_2.detach())+self.loss_fct(online_out_2,target_out_1.detach())
         loss=loss.mean()
         return SequenceClassifierOutput(
             loss=loss,
-            hidden_states=[online_out_1,online_out_2, target_out_1,target_out_2],
+            hidden_states=[proj_online_1,proj_online_2, target_out_1,target_out_2],
             attentions=None,
         )   
         

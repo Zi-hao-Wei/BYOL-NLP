@@ -135,5 +135,11 @@ data/
 bert-base-uncased-weights/
 mocose-bert-base-uncased/
 mocose-bert-base-uncased*
+barlowtwins-base-uncased-weights
 bert-base-uncased-weights.zip
 SentEval.zip
+wiki*
+wandb*
+SimBarlow/SentEval/*
+SimBarlow/data/*
+SimBarlow/output/*

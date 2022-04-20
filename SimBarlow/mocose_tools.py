@@ -12,6 +12,7 @@ from einops import rearrange
 from torchmetrics import Metric
 from torch import nn
 from typing import Union, Any
+import torch.nn.functional as F 
 logger = logging.getLogger(__name__)
 
 PATH_NOW="."
@@ -32,7 +33,7 @@ def print_table(task_names, scores):
     tb.add_row(scores)
     print(tb)
     
-def evalModel(model,tokenizer, pooler): 
+def evalModel(model,tokenizer): 
     tasks = ['STS12', 'STS13', 'STS14', 'STS15', 'STS16', 'STSBenchmark', 'SICKRelatedness']
     
     params = {'task_path': PATH_TO_DATA, 'usepytorch': True, 'kfold': 5}
@@ -58,11 +59,7 @@ def evalModel(model,tokenizer, pooler):
                 batch[k] = batch[k].to(device)
             # Get raw embeddings
             with torch.no_grad():
-                pooler_output = model(**batch, output_hidden_states=True, return_dict=True,sent_emb = True)
-                if pooler == "cls_before_pooler":
-                    pooler_output = pooler_output.last_hidden_state[:, 0]
-                elif pooler == "cls_after_pooler":
-                    pooler_output = pooler_output.pooler_output
+                pooler_output = model(**batch,sent_emb = True)
             return pooler_output.cpu()
     results = {}
 
@@ -88,7 +85,7 @@ def evalModel(model,tokenizer, pooler):
     return sum([float(score) for score in scores])/len(scores)
 
 
-def evalTransferModel(model,tokenizer, pooler): 
+def evalTransferModel(model,tokenizer): 
     tasks = [ 'MR','CR','SUBJ','MPQA','SST2','TREC','MRPC']
     
     params = {'task_path': PATH_TO_DATA, 'usepytorch': True, 'kfold': 10}
@@ -118,11 +115,7 @@ def evalTransferModel(model,tokenizer, pooler):
             
             # Get raw embeddings
             with torch.no_grad():
-                pooler_output = model(**batch, output_hidden_states=True, return_dict=True,sent_emb = True)
-                if pooler == "cls_before_pooler":
-                    pooler_output = pooler_output.last_hidden_state[:, 0]
-                elif pooler == "cls_after_pooler":
-                    pooler_output = pooler_output.pooler_output
+                pooler_output = model(**batch, sent_emb = True)
 
             return pooler_output.cpu()
     results = {}
@@ -139,50 +132,3 @@ def evalTransferModel(model,tokenizer, pooler):
     
     print_table(tasks, scores)
     return sum(scores)/len(scores)
-
-# override the evaluate method
-class MoCoSETrainer(Trainer):
-    def __init__(self,**paraments):
-        super().__init__(**paraments)
-        
-        self.best_sts = 0.0
-        self.best_pool_sts = 0.0
-        self.eval_index = 0
-        self.queue_avg_pearson = 0.0
-        self.queue_pearson_list_per_eval_steps = []
-
-        self.queue_avg_list = []
-
-    def evaluate(
-        self,
-        eval_dataset: Optional[Dataset] = None,
-        ignore_keys: Optional[List[str]] = None,
-        metric_key_prefix: str = "eval",
-        eval_senteval_transfer: bool = False,
-    ) -> Dict[str, float]:
-        # Set params for SentEval (fastmode)
-        params = {'task_path': PATH_TO_DATA, 'usepytorch': True, 'kfold': 5}
-        params['classifier'] = {'nhid': 0, 'optim': 'rmsprop', 'batch_size': 128,
-                                            'tenacity': 3, 'epoch_size': 2}
-
-        self.model.eval()
-        sum_acc = evalModel(self.model,self.tokenizer, pooler = 'cls_after_pooler')
-        #sum_acc_pool = evalModel(self.model,tokenizer, pooler = 'cls_after_pooler')
-        # save and eval model
-        if sum_acc > self.best_sts:
-            self.best_sts = sum_acc
-            self.save_model(self.args.output_dir+"\\best-model")
-        
-        self.model.train()
-        print('acc before pooler:',sum_acc,'\nmax acc ',self.best_sts)
-        
-        return {'acc before pooler':sum_acc}
-
-    def getckalist(self):
-        return self.queue_pearson_list_per_eval_steps
-    
-    def getspearonlist(self):
-        return self.queue_spearon_list_per_eval_steps
-    
-    def get_queue_avg_list(self):
-        return self.queue_avg_list

@@ -56,35 +56,20 @@ class ProjectionLayer(nn.Module):
         self.proj_layers = config.proj_layers
         self.proj = nn.Sequential()
         self.config=config
-        # for i in range(config.proj_layers-1):
-        #     self.proj.append(nn.Linear(config.hidden_size, config.hidden_size))
-        #     self.proj.append(MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
-        #     self.proj.append(nn.Dropout(config.hidden_dropout_prob)
         for i in range(config.proj_layers-1):
-            self.proj.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
-            self.proj.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
-            self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
+            self.proj.add_module("l_norm"+str(i),nn.LayerNorm(config.out_size, eps=config.layer_norm_eps))
             self.proj.add_module("relu_"+str(i),nn.ReLU())
         
         self.relu = nn.ReLU()        
-        self.dense = nn.Linear(config.hidden_size, config.out_size)
+        self.dense1 = nn.Linear(config.hidden_size, config.out_size)
         self.BatchNorm = MaskBatchNorm(config.out_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-    
+        self.dense2=nn.Linear(config.out_size,config.out_size)
     def forward(self, x, **kwargs):
+        x = self.dense1(x)
         if self.proj_layers > 1:
-            # for i in range(self.config.proj_layers-1):
-            #     x = self.proj[3*i](x)
-            #     x = self.proj[3*i+1](x)
-            #     x = self.proj[3*i+2](x)
-            #     x = self.relu(x)
             x=self.proj(x)
-
-        if self.proj_layers > 0:
-            x = self.dense(x)
-            x = self.BatchNorm(x)
-            x = self.dropout(x)
-        
+        x=self.dense2(x)
         return x
 
 
@@ -97,26 +82,17 @@ class MLP(nn.Module):
         self.mlp_layers = config.mlp_layers
         self.mlp=nn.Sequential()
         for i in range(config.mlp_layers-1):
-            self.mlp.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
-            self.mlp.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
-            self.mlp.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
+            self.mlp.add_module("mlp_"+str(i),nn.Linear(config.out_size, config.out_size))
+            self.mlp.add_module("l_norm"+str(i),nn.LayerNorm(config.out_size, eps=config.layer_norm_eps))
             self.mlp.add_module("relu_"+str(i),nn.ReLU())
         
         self.dense = nn.Linear(config.out_size, config.out_size)
-        self.activation = nn.Tanh()
-        self.relu = nn.ReLU()
+        self.activation = nn.ReLU()
 
     def forward(self, x, **kwargs):
         if self.mlp_layers > 1:
-            # for i in range(self.config.proj_layers-1):
-            #     x = self.proj[3*i](x)
-            #     x = self.proj[3*i+1](x)
-            #     x = self.proj[3*i+2](x)
-            #     x = self.relu(x)
             x=self.mlp(x)
         x = self.dense(x)
-        x = self.activation(x)
-        
         return x
 
 class PoolerWithoutActive(nn.Module):
@@ -124,16 +100,11 @@ class PoolerWithoutActive(nn.Module):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
 
-        self.relu=nn.ReLU()
-        self.dense2 = nn.Linear(config.hidden_size, config.hidden_size)
-
     def forward(self, hidden_states, **kwargs):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
         first_token_tensor = hidden_states[:, 0]
         pooled_output = self.dense(first_token_tensor)
-        x=self.relu(pooled_output)
-        x=self.dense2(x)
         return pooled_output
 
 
@@ -168,6 +139,17 @@ class InfoNCEWithQueue(nn.Module):
         loss = self.loss_fct(sim_matrix,target)
         return loss
 
+def off_diagonal(x):
+    # return a flattened view of the off-diagonal elements of a square matrix
+    n, m = x.shape
+    assert n == m
+    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+
+def loss_fn_bar(c): 
+    on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+    off_diag = off_diagonal(c).pow_(2).sum()
+    loss = on_diag + 0.0051 * off_diag
+    return loss
 
 
 features_grad=0.0
@@ -320,7 +302,9 @@ class MoCoSEModel(BertPreTrainedModel):
         self.online_encoder = BertEncoder(config)
         self.online_pooler = PoolerWithoutActive(config)
         self.online_projection = ProjectionLayer(config)
-        
+        self.bn1 = nn.BatchNorm1d(config.out_size, affine=False)
+        self.bn2 = nn.BatchNorm1d(config.out_size, affine=False)
+
         self.predictor = MLP(config)
         self.loss_fct = loss_fn
         self.init_weights()
@@ -497,6 +481,54 @@ class MoCoSEModel(BertPreTrainedModel):
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
         
         # Embedding
+
+        
+
+
+        if sent_emb:
+            self.online_embeddings.eval()
+            self.online_encoder.eval()
+            self.online_pooler.eval()
+            self.online_projection.eval()
+            self.predictor.eval()
+            with torch.no_grad():
+                view1 = self.online_embeddings(
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    token_type_ids=token_type_ids,
+                    inputs_embeds=inputs_embeds,
+                    past_key_values_length=past_key_values_length,
+                    #sent_emb=sent_emb
+                )
+                attention_online = self.online_encoder(
+                    view1,
+                    attention_mask=extended_attention_mask,
+                    head_mask=head_mask,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_extended_attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+                attention_online_last = attention_online[0]
+                cls_vec = self.online_pooler(attention_online_last)
+                cls_vec = self.online_projection(cls_vec)
+                # cls_vec = self.predictor(cls_vec)
+                attention_online.pooler_output = cls_vec
+                return attention_online
+        else:
+            self.online_encoder.train()
+            self.online_pooler.train()
+            self.online_projection.train()
+            self.predictor.train()
+            self.bn1.train()
+            self.bn2.train()
+
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        self.online_embeddings.train()
+       
         view1 = self.online_embeddings(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -505,27 +537,7 @@ class MoCoSEModel(BertPreTrainedModel):
             past_key_values_length=past_key_values_length,
             #sent_emb=sent_emb
         )
-        if sent_emb:
-            attention_online = self.online_encoder(
-                view1,
-                attention_mask=extended_attention_mask,
-                head_mask=head_mask,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_extended_attention_mask,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
-            attention_online_last = attention_online[0]
-            cls_vec = self.online_pooler(attention_online_last)
-            attention_online.pooler_output = cls_vec
-            return attention_online
-       
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        
-       
+
         if self.contextual_wordembs_aug:
             # using contextual word embedding augumentations
             view2 = self.online_embeddings(
@@ -585,20 +597,21 @@ class MoCoSEModel(BertPreTrainedModel):
 
 
         # 进行 project
-        p1 = self.online_projection(proj_online_1)
-        p2 = self.online_projection(proj_online_2)
+        z1 = self.online_projection(proj_online_1)
+        z2 = self.online_projection(proj_online_2)
 
-        # prediction
-        z1 = self.predictor(proj_online_1)
-        z2 = self.predictor(proj_online_2)
+        # # prediction
+        p1 = self.predictor(z1)
+        p2 = self.predictor(z2)
 
+      
 
         # set pooler output
-        view_online_1.pooler_output = p1
-        view_online_2.pooler_output = p2
+        view_online_1.pooler_output = z1
+        view_online_2.pooler_output = z2
 
-        loss = self.loss_fct(p1,z2)/2+self.loss_fct(p2,z1)/2
-        loss=loss.mean()
+        loss = (loss_fn(p1,z2)+loss_fn(p2,z1))*0.5
+
         return SequenceClassifierOutput(
             loss=loss,
             hidden_states=[p1,p2, z1,z2],

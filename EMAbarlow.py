@@ -59,7 +59,7 @@ class ProjectionLayer(nn.Module):
         for i in range(config.proj_layers-1):
             self.proj.add_module("mlp_"+str(i),nn.Linear(config.hidden_size, config.hidden_size))
             self.proj.add_module("relu_"+str(i),nn.ReLU())
-            self.proj.add_module("layer_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
+            self.proj.add_module("batch_norm"+str(i),MaskBatchNorm(config.hidden_size, eps=config.layer_norm_eps))
             self.proj.add_module("dropout_"+str(i),nn.Dropout(config.hidden_dropout_prob))
         
         self.relu = nn.ReLU()        
@@ -72,9 +72,7 @@ class ProjectionLayer(nn.Module):
             x=self.proj(x)
 
         x = self.dense(x)
-        x = self.relu(x)
-        x = self.Batchnorm(x)
-    
+        
         return x
 
 
@@ -102,8 +100,6 @@ class MLP(nn.Module):
             x=self.mlp(x)
 
         x = self.dense(x)
-        x = self.relu(x)
-        x = self.Batchnorm(x)
         
         return x
 
@@ -309,7 +305,7 @@ class MoCoSEEmbeddings(nn.Module):
         return embeddings
 
 
-class MoCoSEModel(BertPreTrainedModel):
+class EMAbarlow(BertPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.decay = config.ema_decay
@@ -674,7 +670,7 @@ class MoCoSEModel(BertPreTrainedModel):
         loss2=loss2.mean()
         # loss=None
         # if self.counter<500:
-        loss = loss1+ 0.1*loss2
+        loss = loss2
         # else:
             # loss = loss2+ 0.1*loss1
         self.counter+=1
